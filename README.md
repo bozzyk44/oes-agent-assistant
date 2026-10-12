@@ -21,6 +21,7 @@
 |---|---|
 | Решения и условия их пересмотра | [docs/architecture/DECISIONS.md](docs/architecture/DECISIONS.md) |
 | Устройство кода: права, запись, бюджет хода, API | [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) |
+| Что видит модель: состав входа, инструменты, формат ответа | [docs/architecture/AGENT.md](docs/architecture/AGENT.md) |
 | Чем доказана каждая гарантия | [docs/development/TESTING.md](docs/development/TESTING.md) |
 | Как измеряется поведение с моделью: прогон, сравнение, судья, мутанты | [docs/development/AI_TESTING.md](docs/development/AI_TESTING.md) |
 | Состав стенда и лимиты | [docs/architecture/INFRASTRUCTURE.md](docs/architecture/INFRASTRUCTURE.md) |
