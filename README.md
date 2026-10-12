@@ -20,6 +20,11 @@
 | Что | Где |
 |---|---|
 | Решения и условия их пересмотра | [docs/architecture/DECISIONS.md](docs/architecture/DECISIONS.md) |
+| Устройство кода: права, запись, бюджет хода, API | [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) |
+| Что видит модель: состав входа, инструменты, формат ответа | [docs/architecture/AGENT.md](docs/architecture/AGENT.md) |
+| Поиск: почему без векторов, когда они нужны, что измерять | [docs/architecture/RETRIEVAL.md](docs/architecture/RETRIEVAL.md) |
+| Чем доказана каждая гарантия | [docs/development/TESTING.md](docs/development/TESTING.md) |
+| Как измеряется поведение с моделью: прогон, сравнение, судья, мутанты | [docs/development/AI_TESTING.md](docs/development/AI_TESTING.md) |
 | Состав стенда и лимиты | [docs/architecture/INFRASTRUCTURE.md](docs/architecture/INFRASTRUCTURE.md) |
 | Правила для ИИ-агента: инварианты задания, лимиты, порядок работы с git | [CLAUDE.md](CLAUDE.md) |
 | Задачи с критериями приёмки | [Issues](https://github.com/bozzyk44/oes-agent-assistant/issues) |
