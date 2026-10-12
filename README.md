@@ -20,6 +20,8 @@
 | Что | Где |
 |---|---|
 | Решения и условия их пересмотра | [docs/architecture/DECISIONS.md](docs/architecture/DECISIONS.md) |
+| Устройство кода: права, запись, бюджет хода, API | [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) |
+| Чем доказана каждая гарантия | [docs/development/TESTING.md](docs/development/TESTING.md) |
 | Состав стенда и лимиты | [docs/architecture/INFRASTRUCTURE.md](docs/architecture/INFRASTRUCTURE.md) |
 | Правила для ИИ-агента: инварианты задания, лимиты, порядок работы с git | [CLAUDE.md](CLAUDE.md) |
 | Задачи с критериями приёмки | [Issues](https://github.com/bozzyk44/oes-agent-assistant/issues) |
