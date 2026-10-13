@@ -1,0 +1,46 @@
+# Окружение `make test`: PostgreSQL и контейнер с линтером, типами и тестами.
+# Сеть внутренняя: выхода наружу у тестов нет, обращение к модели или в интернет упадёт.
+# Пароль ниже — метка для тестов, а не секрет: база живёт в памяти до конца запуска.
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: test-postgres-password-marker-7c41
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
+      start_interval: 1s
+    networks: [isolated]
+
+  tests:
+    build:
+      context: .
+      target: dev
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PASSWORD: test-postgres-password-marker-7c41
+      RUFF_NO_CACHE: "true"
+      # Тест проверяет, что выхода наружу действительно нет.
+      EXPECT_NO_NETWORK: "1"
+    command:
+      - sh
+      - -ec
+      - |
+        ruff check .
+        ruff format --check .
+        mypy --cache-dir=/tmp/mypy
+        pytest -p no:cacheprovider
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [isolated]
+
+networks:
+  isolated:
+    internal: true

@@ -1,0 +1,135 @@
+# Базовый запуск: PostgreSQL → загрузчик → сервис и заглушка ТОиР. Облако не нужно.
+# Секреты берутся из .env; без него compose останавливается и называет переменную.
+# Создать .env со случайными секретами: `make run`.
+
+name: oes-assistant
+
+# Тег образа не задан намеренно: у каждого проекта compose свои образы, и запуск
+# локального CI не подменяет образ под работающим `make run`.
+x-app: &app
+  build:
+    context: .
+    target: runtime
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?не задан POSTGRES_PASSWORD — создайте .env командой make run}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # Проверка по сети, а не по сокету: во время инициализации образ поднимает
+      # временный сервер, который слушает только сокет и которому верить нельзя.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
+      start_interval: 1s
+    mem_limit: 768m
+    restart: unless-stopped
+
+  loader:
+    <<: *app
+    command: ["python", "-m", "assistant.ingest"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?не задан POSTGRES_PASSWORD — создайте .env командой make run}
+      DATABASE_OWNER_URL: ${DATABASE_OWNER_URL:?не задан DATABASE_OWNER_URL — создайте .env командой make run}
+      DATABASE_URL: ${DATABASE_URL:?не задан DATABASE_URL — создайте .env командой make run}
+      TOIR_DATABASE_URL: ${TOIR_DATABASE_URL:?не задан TOIR_DATABASE_URL — создайте .env командой make run}
+      DATA_DIR: /data
+    volumes:
+      - type: bind
+        source: ${DATA_DIR:-./data}
+        target: /data
+        read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  assistant:
+    <<: *app
+    command: ["uvicorn", "assistant.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?не задан DATABASE_URL — создайте .env командой make run}
+      TOIR_URL: ${TOIR_URL:-http://toir:8001}
+      TOIR_TOKEN: ${TOIR_TOKEN:?не задан TOIR_TOKEN — создайте .env командой make run}
+      # Пустые значения допустимы: сервис стартует, ход завершится с outcome: error.
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_NAME: ${MODEL_NAME:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    ports:
+      - "${SERVICE_BIND:-127.0.0.1}:${SERVICE_PORT:-8000}:8000"
+    extra_hosts:
+      # Модель на машине разработчика: localhost внутри контейнера — это сам контейнер.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      loader:
+        condition: service_completed_successfully
+    healthcheck: &http-ready
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
+    mem_limit: 768m
+    restart: unless-stopped
+
+  toir:
+    <<: *app
+    command: ["uvicorn", "toir_stub.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      TOIR_DATABASE_URL: ${TOIR_DATABASE_URL:?не задан TOIR_DATABASE_URL — создайте .env командой make run}
+      TOIR_TOKEN: ${TOIR_TOKEN:?не задан TOIR_TOKEN — создайте .env командой make run}
+    # Порт наружу не публикуется: заглушка нужна только сервису и прогону.
+    depends_on:
+      loader:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *http-ready
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8001/healthz', timeout=2)"]
+    mem_limit: 192m
+    restart: unless-stopped
+
+  # Разовые команды: запускаются целями make, в `docker compose up` не участвуют.
+
+  datagen:
+    <<: *app
+    profiles: ["tools"]
+    command: ["python", "-m", "datagen"]
+    network_mode: none
+    volumes:
+      - ./data:/app/data
+
+  evalrun:
+    <<: *app
+    profiles: ["tools"]
+    command: ["python", "-m", "evalrun"]
+    environment:
+      ASSISTANT_URL: http://assistant:8000
+      TOIR_URL: http://toir:8001
+      TOIR_TOKEN: ${TOIR_TOKEN:?не задан TOIR_TOKEN — создайте .env командой make run}
+      PRICE_INPUT: ${PRICE_INPUT:-}
+      PRICE_CACHED: ${PRICE_CACHED:-}
+      PRICE_OUTPUT: ${PRICE_OUTPUT:-}
+      DATA_DIR: /data
+      QUESTIONS: /questions/${QUESTIONS_FILE:-questions.jsonl}
+      EVAL_DIR: /app/eval
+    volumes:
+      - type: bind
+        source: ${QUESTIONS_DIR:-${DATA_DIR:-./data}}
+        target: /questions
+        read_only: true
+      - type: bind
+        source: ${DATA_DIR:-./data}
+        target: /data
+        read_only: true
+      - ./eval:/app/eval
+
+volumes:
+  pgdata:

@@ -1,0 +1,8 @@
+# В образ идёт только то, что названо в Dockerfile; набор данных и секреты — никогда.
+*
+!pyproject.toml
+!uv.lock
+!src
+!tests
+**/__pycache__
+**/*.pyc
