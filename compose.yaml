@@ -4,8 +4,9 @@
 
 name: oes-assistant
 
+# Тег образа не задан намеренно: у каждого проекта compose свои образы, и запуск
+# локального CI не подменяет образ под работающим `make run`.
 x-app: &app
-  image: oes-agent-assistant:local
   build:
     context: .
     target: runtime

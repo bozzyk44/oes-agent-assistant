@@ -52,7 +52,14 @@ def check_server(host: str, port: int, password: str) -> str:
             row = conn.execute("select current_setting('server_version')").fetchone()
     except psycopg.OperationalError as exc:
         # Текст ошибки драйвера содержит адрес и имя роли, но не пароль.
-        raise StartupError(f"PostgreSQL недоступен: {exc}".strip()) from exc
+        message = f"PostgreSQL недоступен: {exc}".strip()
+        if "password authentication failed" in str(exc):
+            message += (
+                ". Пароль администратора сервер запоминает при создании тома базы: "
+                "скорее всего, том создан с другим .env. Верните прежний .env "
+                "или удалите том командой `make reset`"
+            )
+        raise StartupError(message) from exc
     if row is None:
         raise StartupError("PostgreSQL не вернул версию сервера")
     return str(row[0])

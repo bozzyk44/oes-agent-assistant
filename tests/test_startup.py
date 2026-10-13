@@ -59,3 +59,5 @@ def test_wrong_password_fails_without_echoing_it() -> None:
             password=wrong,
         )
     assert wrong not in str(caught.value)
+    # Новый .env поверх старого тома — частый случай; ошибка должна говорить, что делать.
+    assert "make reset" in str(caught.value)

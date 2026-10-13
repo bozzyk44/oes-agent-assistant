@@ -3,11 +3,15 @@
 # порядок старта, переменные окружения, монтирование набора, публикацию портов,
 # перезапуск сервиса и повторный старт поверх существующего тома базы.
 #
-# Запускается целью `make smoke`. Том базы проекта удаляется в начале и в конце:
-# не запускайте на проекте с данными, которые жалко. `make ci` берёт отдельный проект.
+# Запускается целью `make smoke` в собственном проекте compose: том базы этого проекта
+# удаляется в начале и в конце, запущенный рядом `make run` не задевается.
 set -eu
 
-: "${COMPOSE:=docker compose}"
+: "${SMOKE_PROJECT:=oes-assistant-smoke}"
+: "${COMPOSE:=docker compose -p $SMOKE_PROJECT}"
+: "${MAKE:=make}"
+# Порт на хосте — случайный: постоянный может быть занят работающим `make run`.
+export SERVICE_PORT=0
 
 step() { printf '\n== %s\n' "$1"; }
 fail() { printf 'smoke: ПРОВАЛ — %s\n' "$1" >&2; exit 1; }
@@ -22,6 +26,10 @@ mkdir -p "$smoke_data"
 : > "$smoke_data/$marker"
 : > "$smoke_data/questions.jsonl"
 export DATA_DIR="$smoke_data"
+# Имя модели задано только в окружении оболочки: в .env копии оно пустое.
+export MODEL_NAME="smoke-model-$$"
+mkdir -p "$PWD/.smoke/q dir"
+: > "$PWD/.smoke/q dir/my questions.jsonl"
 
 cleanup() {
     status=$?
@@ -46,25 +54,39 @@ step "без переменных compose останавливается и на
 if out=$(env -u POSTGRES_PASSWORD $COMPOSE --env-file /dev/null config 2>&1); then
     fail "compose принял пустое окружение"
 fi
+# Не заданы все обязательные переменные сразу; какую из них compose назовёт первой,
+# зависит от его версии. Достаточно, что названа любая и сказано, что делать.
 case "$out" in
-    *POSTGRES_PASSWORD*) ;;
-    *) fail "в сообщении нет имени переменной: $out" ;;
+    *"required variable"*"создайте .env командой make run"*) ;;
+    *) fail "нет имени переменной или подсказки: $out" ;;
+esac
+
+step "набор по умолчанию — каталог data/ проекта"
+case "$(DATA_DIR=data/ $COMPOSE config 2>&1)" in
+    *"source: $PWD/data"*) ;;
+    *) fail "DATA_DIR=data/ не превратился в каталог data проекта" ;;
 esac
 
 step "чистый старт"
 $COMPOSE down --volumes --remove-orphans >/dev/null 2>&1 || true
 $COMPOSE up --build --detach --wait
 
-step "загрузчик завершился без ошибки до старта сервиса"
+step "загрузчик завершился без ошибки до старта сервиса и заглушки"
 loader=$($COMPOSE ps --all --quiet loader)
 [ -n "$loader" ] || fail "контейнера загрузчика нет"
 [ "$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$loader")" = "exited 0" ] \
     || fail "загрузчик не завершился с кодом 0"
 loader_done=$(docker inspect --format '{{.State.FinishedAt}}' "$loader")
-service_start=$(docker inspect --format '{{.State.StartedAt}}' "$($COMPOSE ps --quiet assistant)")
-# Метки времени в одном формате и поясе: строки сравниваются как время.
-[ "$(printf '%s\n%s\n' "$loader_done" "$service_start" | sort | head -n 1)" = "$loader_done" ] \
-    || fail "сервис стартовал раньше, чем завершился загрузчик"
+for service in assistant toir; do
+    started=$(docker inspect --format '{{.State.StartedAt}}' "$($COMPOSE ps --quiet "$service")")
+    # Метки времени в одном формате и поясе: строки сравниваются как время.
+    [ "$(printf '%s\n%s\n' "$loader_done" "$started" | sort | head -n 1)" = "$loader_done" ] \
+        || fail "$service стартовал раньше, чем завершился загрузчик"
+done
+
+step "имя модели из окружения оболочки дошло до сервиса"
+[ "$($COMPOSE exec -T assistant printenv MODEL_NAME)" = "$MODEL_NAME" ] \
+    || fail "MODEL_NAME из оболочки не дошёл до сервиса"
 
 step "набор смонтирован в загрузчик с хоста и только на чтение"
 mounts=$(docker inspect --format '{{range .Mounts}}{{.Destination}}={{.RW}} {{end}}' "$loader")
@@ -93,11 +115,16 @@ if $COMPOSE --profile tools run --rm -T --user 0 evalrun touch /questions/writte
     fail "в /questions удалось записать"
 fi
 
+step "make eval QUESTIONS=<путь с пробелами> монтирует каталог своего файла"
+$MAKE eval COMPOSE_PROJECT="$SMOKE_PROJECT" QUESTIONS=".smoke/q dir/my questions.jsonl" \
+    EVAL_ARGS='sh -c "test -f \"\$$QUESTIONS\" && test -d /data && test -w /app/eval"' \
+    || fail "make eval не увидел свой файл вопросов"
+
 step "сервис и заглушка отвечают внутри сети"
 case "$(fetch http://127.0.0.1:8000/healthz)" in *'"ok"'*) ;; *) fail "сервис не готов" ;; esac
 case "$(fetch http://toir:8001/healthz)" in *'"ok"'*) ;; *) fail "заглушка недоступна сервису" ;; esac
 
-step "хост доступен сервису по имени host.docker.internal"
+step "имя host.docker.internal разрешается в контейнере сервиса"
 $COMPOSE exec -T assistant python -c \
     "import socket; socket.gethostbyname('host.docker.internal')" \
     || fail "имя host.docker.internal не разрешается"

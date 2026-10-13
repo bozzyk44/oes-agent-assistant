@@ -19,7 +19,6 @@ services:
     networks: [isolated]
 
   tests:
-    image: oes-agent-assistant:dev
     build:
       context: .
       target: dev
@@ -27,6 +26,8 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_PASSWORD: test-postgres-password-marker-7c41
       RUFF_NO_CACHE: "true"
+      # Тест проверяет, что выхода наружу действительно нет.
+      EXPECT_NO_NETWORK: "1"
     command:
       - sh
       - -ec

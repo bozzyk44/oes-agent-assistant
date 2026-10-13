@@ -1,23 +1,23 @@
 # Все цели выполняются в контейнерах: на машине нужны только Docker и make.
 
-PROJECT ?= oes-assistant
-COMPOSE := docker compose -p $(PROJECT)
-COMPOSE_TEST := docker compose -p $(PROJECT)-test -f compose.test.yaml
+# Цели задания — data, run, test, eval — требуют только Docker и make. Цели smoke и ci —
+# сценарии оболочки: им нужны sh, а ci — ещё git и tar; REPORT=1 требует gh.
+
+COMPOSE_PROJECT ?= oes-assistant
+COMPOSE := docker compose -p $(COMPOSE_PROJECT)
+COMPOSE_TEST := docker compose -p $(COMPOSE_PROJECT)-test -f compose.test.yaml
+# Сценарий сборки удаляет том базы, поэтому работает в своём проекте, а не в том, что поднят make run.
+COMPOSE_SMOKE := docker compose -p $(COMPOSE_PROJECT)-smoke
 # Файлы, которые контейнер пишет в каталоги хоста, принадлежат тому, кто запустил make.
 HOST_USER := $(shell id -u):$(shell id -g)
 
-# Свой файл вопросов: make eval QUESTIONS=<путь>. По умолчанию — $DATA_DIR/questions.jsonl,
-# это значение подставляет compose.
-ifdef QUESTIONS
-EVAL_ENV := QUESTIONS_DIR="$(abspath $(dir $(QUESTIONS)))" QUESTIONS_FILE="$(notdir $(QUESTIONS))"
-endif
-
-.PHONY: help env data run down test eval smoke ci lock
+.PHONY: help env data run down reset test eval smoke ci lock
 
 help:
 	@echo "make data   — сгенерировать набор в data/"
 	@echo "make run    — создать .env при необходимости и поднять сервис, заглушку ТОиР и PostgreSQL"
 	@echo "make down   — остановить; том базы остаётся"
+	@echo "make reset  — остановить и удалить том базы"
 	@echo "make test   — линтер, типы и тесты, без сети и модели"
 	@echo "make eval   — прогон эталонных вопросов по запущенному сервису; QUESTIONS=<путь>"
 	@echo "make smoke  — сценарий сборки: поднять всё с нуля и проверить связку"
@@ -36,17 +36,28 @@ run: env
 down:
 	$(COMPOSE) down --remove-orphans
 
+reset:
+	$(COMPOSE) down --volumes --remove-orphans
+
 test:
 	$(COMPOSE_TEST) build tests
 	@$(COMPOSE_TEST) run --rm tests; status=$$?; \
 	$(COMPOSE_TEST) down --volumes --remove-orphans >/dev/null 2>&1; \
 	exit $$status
 
+# Свой файл вопросов: make eval QUESTIONS=<путь>. Каталог и имя вычисляет оболочка, а не
+# функции make: те делят путь по пробелам. Без QUESTIONS compose берёт $DATA_DIR/questions.jsonl.
+# EVAL_ARGS заменяет команду контейнера: так сценарий сборки проверяет монтирования.
 eval: env
-	$(EVAL_ENV) $(COMPOSE) --profile tools run --rm --build --user $(HOST_USER) evalrun
+	@if [ -n "$(QUESTIONS)" ]; then \
+		QUESTIONS_DIR=$$(cd "$$(dirname "$(QUESTIONS)")" && pwd) || exit 1; \
+		QUESTIONS_FILE=$$(basename "$(QUESTIONS)"); \
+		export QUESTIONS_DIR QUESTIONS_FILE; \
+	fi; \
+	$(COMPOSE) --profile tools run --rm --build --user $(HOST_USER) evalrun $(EVAL_ARGS)
 
 smoke: env
-	@COMPOSE='$(COMPOSE)' sh scripts/smoke.sh
+	@COMPOSE='$(COMPOSE_SMOKE)' SMOKE_PROJECT='$(COMPOSE_PROJECT)-smoke' MAKE='$(MAKE)' sh scripts/smoke.sh
 
 ci:
 	@REPORT='$(REPORT)' sh scripts/ci-local.sh

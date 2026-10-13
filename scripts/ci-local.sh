@@ -32,8 +32,16 @@ git -C "$root" archive "$sha" | tar -x -C "$work"
 
 echo "ci: коммит $short, копия в $work"
 status=0
-# Свой проект compose и случайный порт: запущенный рядом `make run` не задевается.
-(cd "$work" && PROJECT=oes-assistant-ci SERVICE_PORT=0 make test smoke) || status=$?
+# Окружение оболочки в проверку не передаётся: переменные оболочки сильнее .env, и с ними
+# проверялся бы не коммит. Остаётся только то, без чего не найти Docker.
+# Свой проект compose: запущенный рядом `make run` не задевается.
+(cd "$work" && env -i \
+    PATH="$PATH" HOME="$HOME" \
+    ${DOCKER_HOST:+DOCKER_HOST="$DOCKER_HOST"} \
+    ${DOCKER_CONTEXT:+DOCKER_CONTEXT="$DOCKER_CONTEXT"} \
+    ${DOCKER_CONFIG:+DOCKER_CONFIG="$DOCKER_CONFIG"} \
+    COMPOSE_PROJECT=oes-assistant-ci \
+    make test smoke) || status=$?
 
 if [ "$status" -eq 0 ]; then
     state=success
