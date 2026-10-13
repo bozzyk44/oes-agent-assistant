@@ -89,11 +89,35 @@ step "чистый старт"
 $COMPOSE down --volumes --remove-orphans >/dev/null 2>&1 || true
 $COMPOSE up --build --detach --wait
 
-step "загрузчик завершился без ошибки до старта сервиса и заглушки"
+step "роли, миграции и загрузка — три шага по порядку, каждый завершился без ошибки"
+previous_done=""
+for one_off in bootstrap migrate loader; do
+    container=$($COMPOSE ps --all --quiet "$one_off")
+    [ -n "$container" ] || fail "нет контейнера шага $one_off"
+    [ "$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$container")" = "exited 0" ] \
+        || fail "шаг $one_off не завершился с кодом 0"
+    started=$(docker inspect --format '{{.State.StartedAt}}' "$container")
+    # Метки времени в одном формате и поясе: строки сравниваются как время.
+    if [ -n "$previous_done" ]; then
+        [ "$(printf '%s\n%s\n' "$previous_done" "$started" | sort | head -n 1)" = "$previous_done" ] \
+            || fail "шаг $one_off стартовал раньше, чем завершился предыдущий"
+    fi
+    previous_done=$(docker inspect --format '{{.State.FinishedAt}}' "$container")
+    # Пароль администратора сервера — только у шага ролей и баз. Сравниваются имена
+    # переменных; значения не печатаются.
+    names=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" | cut -d= -f1)
+    case "$one_off:$(printf '%s\n' "$names" | grep -c -x POSTGRES_PASSWORD)" in
+        bootstrap:1|migrate:0|loader:0) ;;
+        *) fail "пароль администратора сервера не там: шаг $one_off" ;;
+    esac
+done
+case "$($COMPOSE logs --no-log-prefix migrate 2>&1)" in
+    *"миграции применены"*) ;;
+    *) fail "шаг миграций не сообщил о применении миграций на пустую базу" ;;
+esac
+
+step "загрузчик завершился до старта сервиса и заглушки"
 loader=$($COMPOSE ps --all --quiet loader)
-[ -n "$loader" ] || fail "контейнера загрузчика нет"
-[ "$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$loader")" = "exited 0" ] \
-    || fail "загрузчик не завершился с кодом 0"
 loader_done=$(docker inspect --format '{{.State.FinishedAt}}' "$loader")
 for service in assistant toir; do
     started=$(docker inspect --format '{{.State.StartedAt}}' "$($COMPOSE ps --quiet "$service")")
@@ -102,7 +126,13 @@ for service in assistant toir; do
         || fail "$service стартовал раньше, чем завершился загрузчик"
 done
 
-step "загрузчик создал роли и схему и загрузил набор сценария"
+step "make migrate поверх работающего запуска ничего не меняет"
+case "$($MAKE migrate COMPOSE_PROJECT="$SMOKE_PROJECT" 2>&1)" in
+    *"схема уже на последней версии"*) ;;
+    *) fail "повторное применение миграций что-то изменило или не прошло" ;;
+esac
+
+step "набор сценария загружен, база под ролью сервиса в порядке"
 case "$($COMPOSE logs --no-log-prefix loader 2>&1)" in
     *"набор загружен"*) ;;
     *) fail "загрузчик не сообщил о загрузке набора" ;;

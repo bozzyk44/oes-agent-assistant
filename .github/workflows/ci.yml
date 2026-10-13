@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+      - name: Миграции
+        run: make migrate-check
       - name: Линтер, типы, тесты
         run: make test
       - name: Сценарий сборки

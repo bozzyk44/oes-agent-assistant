@@ -1,5 +1,6 @@
 #!/bin/sh
-# Локальный CI — основной способ проверки в этом проекте: `make test` и `make smoke`
+# Локальный CI — основной способ проверки в этом проекте: `make migrate-check`, `make test`
+# и `make smoke`
 # на чистой копии текущего коммита. Незакоммиченные правки и файлы вне git в проверку
 # не входят: проверяется ровно то, что уйдёт в PR.
 #
@@ -41,7 +42,7 @@ status=0
     ${DOCKER_CONTEXT:+DOCKER_CONTEXT="$DOCKER_CONTEXT"} \
     ${DOCKER_CONFIG:+DOCKER_CONFIG="$DOCKER_CONFIG"} \
     COMPOSE_PROJECT=oes-assistant-ci \
-    make test smoke) || status=$?
+    make migrate-check test smoke) || status=$?
 
 if [ "$status" -eq 0 ]; then
     state=success
@@ -56,7 +57,7 @@ if [ "${REPORT:-}" = "1" ]; then
     gh api --silent --method POST "repos/$repo/statuses/$sha" \
         -f state="$state" \
         -f context="ci/local" \
-        -f description="make test и make smoke на машине разработчика"
+        -f description="миграции, make test и make smoke на машине разработчика"
     echo "ci: статус $state записан для $short в $repo"
 fi
 

@@ -1,4 +1,5 @@
-# Базовый запуск: PostgreSQL → загрузчик → сервис и заглушка ТОиР. Облако не нужно.
+# Базовый запуск: PostgreSQL → роли и базы → миграции → загрузка набора → сервис и заглушка
+# ТОиР. Облако не нужно.
 # Секреты берутся из .env; без него compose останавливается и называет переменную.
 # Создать .env со случайными секретами: `make run`.
 
@@ -30,15 +31,41 @@ services:
     mem_limit: 768m
     restart: unless-stopped
 
-  loader:
+  # Три разовых шага перед сервисом; каждый стартует после успешного завершения предыдущего.
+
+  # Роли и базы. Единственный шаг с паролем администратора сервера.
+  bootstrap:
     <<: *app
-    command: ["python", "-m", "assistant.ingest"]
+    command: ["python", "-m", "assistant.ingest", "bootstrap"]
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?не задан POSTGRES_PASSWORD — создайте .env командой make run}
       DATABASE_OWNER_URL: ${DATABASE_OWNER_URL:?не задан DATABASE_OWNER_URL — создайте .env командой make run}
       DATABASE_URL: ${DATABASE_URL:?не задан DATABASE_URL — создайте .env командой make run}
       TOIR_DATABASE_URL: ${TOIR_DATABASE_URL:?не задан TOIR_DATABASE_URL — создайте .env командой make run}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Миграции схемы и права роли сервиса. Тот же шаг — `make migrate` и шаг деплоя.
+  migrate:
+    <<: *app
+    command: ["python", "-m", "assistant.ingest", "migrate"]
+    environment:
+      DATABASE_OWNER_URL: ${DATABASE_OWNER_URL:?не задан DATABASE_OWNER_URL — создайте .env командой make run}
+      DATABASE_URL: ${DATABASE_URL:?не задан DATABASE_URL — создайте .env командой make run}
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # Загрузка набора. Миграции не применяет: на отставшей схеме останавливается.
+  loader:
+    <<: *app
+    command: ["python", "-m", "assistant.ingest", "load"]
+    environment:
+      DATABASE_OWNER_URL: ${DATABASE_OWNER_URL:?не задан DATABASE_OWNER_URL — создайте .env командой make run}
       DATA_DIR: /data
     volumes:
       - type: bind
@@ -46,8 +73,8 @@ services:
         target: /data
         read_only: true
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: "no"
 
   assistant:

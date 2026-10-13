@@ -1,0 +1,176 @@
+"""Проверка миграций — отдельный шаг CI: `make migrate-check`.
+
+Миграции применяются на пустую базу, повторно, откатываются до нуля и применяются снова;
+модели сверяются со схемой; загрузчик набора на отставшей схеме останавливается. Работа
+идёт в своей базе, созданной на время теста: общую базу тестов откат бы опустошил.
+"""
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from psycopg import sql
+from sqlalchemy import Engine, create_engine, inspect, text
+
+from assistant.db import models
+from assistant.db.grants import grant_service
+from assistant.db.migrate import (
+    SchemaOutdated,
+    current_revision,
+    downgrade,
+    head_revision,
+    require_head,
+    upgrade,
+)
+from assistant.ingest.__main__ import load, main, migrate
+from assistant.ingest.startup import connect_admin
+from tests.conftest import OWNER_PASSWORD, SERVICE_PASSWORD, Database
+from tests.smallset import write_small_dataset
+
+pytestmark = [pytest.mark.db, pytest.mark.migrations]
+
+PROBE = "migrations_probe"
+
+
+@pytest.fixture
+def empty(database: Database) -> Iterator[Engine]:
+    """Пустая база владельца: в ней нет ни одной миграции."""
+    name = sql.Identifier(PROBE)
+    with connect_admin(database.host, database.port, database.admin_password) as admin:
+        admin.execute(sql.SQL("drop database if exists {} with (force)").format(name))
+        admin.execute(sql.SQL("create database {} owner test_owner").format(name))
+        admin.execute(sql.SQL("revoke all on database {} from public").format(name))
+        admin.execute(sql.SQL("grant connect on database {} to test_app").format(name))
+    engine = create_engine(database.url("test_owner", OWNER_PASSWORD, PROBE))
+    yield engine
+    engine.dispose()
+    with connect_admin(database.host, database.port, database.admin_password) as admin:
+        admin.execute(sql.SQL("drop database if exists {} with (force)").format(name))
+
+
+def _schemas(engine: Engine) -> set[str]:
+    return set(inspect(engine).get_schema_names()) & {"app", "dwh", "kb"}
+
+
+def _objects(engine: Engine) -> list[tuple[str, ...]]:
+    """Слепок схемы: таблицы с колонками, политики, функции и триггеры."""
+    queries = (
+        "select 'column', table_schema, table_name, column_name, data_type, is_nullable"
+        " from information_schema.columns where table_schema in ('app', 'dwh', 'kb')",
+        "select 'policy', schemaname, tablename, policyname, cmd, coalesce(qual, '')"
+        " from pg_policies",
+        "select 'function', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),"
+        " p.prosecdef::text, '' from pg_proc p join pg_namespace n on n.oid = p.pronamespace"
+        " where n.nspname in ('app', 'dwh', 'kb')",
+        "select 'trigger', event_object_schema, event_object_table, trigger_name,"
+        " event_manipulation, '' from information_schema.triggers",
+        "select 'constraint', n.nspname, c.conrelid::regclass::text, c.conname, c.contype::text,"
+        " pg_get_constraintdef(c.oid) from pg_constraint c"
+        " join pg_namespace n on n.oid = c.connamespace where n.nspname in ('app', 'dwh', 'kb')",
+    )
+    with engine.connect() as connection:
+        rows = [tuple(row) for query in queries for row in connection.execute(text(query))]
+    return sorted(rows)
+
+
+def test_migrations_apply_to_empty_database_and_repeat_changes_nothing(empty: Engine) -> None:
+    with empty.connect() as connection:
+        assert current_revision(connection) is None
+    assert _schemas(empty) == set()
+    with empty.begin() as connection:
+        assert upgrade(connection) is True
+    with empty.connect() as connection:
+        assert current_revision(connection) == head_revision()
+    assert _schemas(empty) == {"app", "dwh", "kb"}
+    first = _objects(empty)
+    assert first
+    with empty.begin() as connection:
+        # Повторное применение — пустой шаг.
+        assert upgrade(connection) is False
+    assert _objects(empty) == first
+
+
+def test_downgrade_to_base_and_upgrade_again_gives_the_same_schema(empty: Engine) -> None:
+    with empty.begin() as connection:
+        upgrade(connection)
+    first = _objects(empty)
+    with empty.begin() as connection:
+        downgrade(connection)
+    with empty.connect() as connection:
+        assert current_revision(connection) is None
+    # Откат не оставляет за собой ни схем, ни объектов в них.
+    assert _schemas(empty) == set()
+    assert _objects(empty) == []
+    with empty.begin() as connection:
+        assert upgrade(connection) is True
+    assert _objects(empty) == first
+
+
+def test_models_match_migrated_schema(empty: Engine) -> None:
+    with empty.begin() as connection:
+        upgrade(connection)
+    inspector = inspect(empty)
+    in_database = {
+        f"{schema}.{table}"
+        for schema in ("app", "dwh", "kb")
+        for table in inspector.get_table_names(schema)
+    }
+    # Таблица без модели и модель без таблицы — одинаково расхождение.
+    assert in_database == set(models.Base.metadata.tables)
+    for table in models.Base.metadata.tables.values():
+        columns = {col["name"]: col for col in inspector.get_columns(table.name, table.schema)}
+        assert set(columns) == {column.name for column in table.columns}, table.fullname
+        for column in table.columns:
+            if column.name == "tsv":
+                continue
+            assert columns[column.name]["nullable"] == column.nullable, (
+                f"{table.fullname}.{column.name}"
+            )
+        primary = inspector.get_pk_constraint(table.name, table.schema)["constrained_columns"]
+        assert set(primary) == {column.name for column in table.primary_key}, table.fullname
+
+
+def test_migrate_step_reports_what_it_did(database: Database, empty: Engine) -> None:
+    env = {
+        "DATABASE_OWNER_URL": database.url("test_owner", OWNER_PASSWORD, PROBE),
+        "DATABASE_URL": database.url("test_app", SERVICE_PASSWORD, PROBE),
+    }
+    assert migrate(env) == f"миграции применены: пустая база -> {head_revision()}"
+    assert migrate(env) == f"схема уже на последней версии: {head_revision()}"
+    # Права роли сервиса выданы тем же шагом.
+    service = create_engine(env["DATABASE_URL"])
+    try:
+        with service.connect() as connection:
+            assert connection.scalar(text("select count(*) from app.users")) == 0
+    finally:
+        service.dispose()
+
+
+def test_loader_stops_on_outdated_schema(
+    database: Database,
+    empty: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Загрузчик набора миграции не применяет: на базе без них он останавливается
+    # и называет команду, которая доведёт схему.
+    env = {
+        "DATABASE_OWNER_URL": database.url("test_owner", OWNER_PASSWORD, PROBE),
+        "DATA_DIR": str(write_small_dataset(tmp_path)),
+    }
+    with pytest.raises(SchemaOutdated, match="make migrate"):
+        load(env)
+    assert _schemas(empty) == set()
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert main(["load"]) == 1
+    message = capsys.readouterr().err
+    assert "load: схема базы не на последней версии" in message
+    assert OWNER_PASSWORD not in message
+
+    with empty.begin() as connection:
+        upgrade(connection)
+        grant_service(connection, database.accounts.service.role)
+        require_head(connection)
+    assert load(env).startswith("набор загружен")
