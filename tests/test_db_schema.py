@@ -1,50 +1,12 @@
-"""Миграции, соответствие моделей схеме и права роли сервиса на объекты."""
+"""Права роли сервиса на объекты схемы. Сами миграции проверяет `test_db_migrations.py`."""
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from assistant.db import models
-from assistant.db.grants import grant_service
-from assistant.db.migrate import upgrade
 from tests.conftest import Database
 
 pytestmark = pytest.mark.db
-
-
-def test_migrations_apply_and_second_run_changes_nothing(database: Database) -> None:
-    def state() -> tuple[str, int]:
-        with database.owner.connect() as connection:
-            version = connection.scalar(text("select version_num from alembic_version"))
-            tables = connection.scalar(
-                text(
-                    "select count(*) from information_schema.tables"
-                    " where table_schema in ('app', 'dwh', 'kb')"
-                )
-            )
-        return str(version), int(tables or 0)
-
-    before = state()
-    with database.owner.begin() as connection:
-        upgrade(connection)
-        grant_service(connection, database.accounts.service.role)
-    assert state() == before
-    assert before[1] == len(models.Base.metadata.tables)
-
-
-def test_models_match_schema(database: Database) -> None:
-    inspector = inspect(database.owner)
-    for table in models.Base.metadata.tables.values():
-        columns = {col["name"]: col for col in inspector.get_columns(table.name, table.schema)}
-        assert set(columns) == {column.name for column in table.columns}, table.fullname
-        for column in table.columns:
-            if column.name == "tsv":
-                continue
-            assert columns[column.name]["nullable"] == column.nullable, (
-                f"{table.fullname}.{column.name}"
-            )
-        primary = inspector.get_pk_constraint(table.name, table.schema)["constrained_columns"]
-        assert set(primary) == {column.name for column in table.primary_key}, table.fullname
 
 
 def test_service_role_owns_nothing(database: Database) -> None:

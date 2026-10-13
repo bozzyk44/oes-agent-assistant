@@ -6,8 +6,9 @@ import pytest
 from sqlalchemy import text
 
 from assistant.db.binding import bind_user
-from assistant.ingest.__main__ import main, run
+from assistant.ingest.__main__ import bootstrap, load, main, migrate
 from assistant.ingest.dataset import DatasetError
+from assistant.ingest.startup import StartupError
 from datagen.world import World
 from tests.conftest import Database
 from tests.smallset import write_small_dataset
@@ -186,12 +187,17 @@ def test_loader_end_to_end_is_idempotent(database: Database, tmp_path: Path) -> 
     )
     (root / "docs" / "README.md").write_text("без frontmatter\n", encoding="utf-8")
     env = _env(database, root)
-    message = run(env)
+    # Три шага по порядку, как в compose: роли и базы, миграции, загрузка.
+    assert bootstrap(env).startswith("роли и базы на месте")
+    assert migrate(env).startswith("схема уже на последней версии")
+    message = load(env)
     assert message.startswith("набор загружен: документов 4, пользователей 4, строк КХД 12")
     assert "пропущены файлы без frontmatter: docs/README.md" in message
     _leave_state(database, "u-k1")
-    # Повторный запуск: роли, миграции и права на месте, набор тот же.
-    assert run(env).startswith("набор не изменился")
+    # Повторный запуск всех шагов: роли, миграции и права на месте, набор тот же.
+    assert bootstrap(env).startswith("роли и базы на месте")
+    assert migrate(env).startswith("схема уже на последней версии")
+    assert load(env).startswith("набор не изменился")
     assert _state(database) == (1, 1)
     with database.service.begin() as connection:
         bind_user(connection, "u-k1")
@@ -214,8 +220,29 @@ def test_loader_stops_with_file_and_line(
     )
     for name, value in _env(database, bad).items():
         monkeypatch.setenv(name, value)
-    assert main() == 1
+    assert main(["load"]) == 1
     message = capsys.readouterr().err
-    assert "downtime.csv:3: время" in message
+    assert "load: downtime.csv:3: время" in message
     assert database.admin_password not in message
     assert _counts(database) == before
+
+
+def test_each_step_gets_only_its_own_secrets(database: Database, tmp_path: Path) -> None:
+    # Пароль администратора сервера нужен только шагу ролей и баз.
+    env = _env(database, write_small_dataset(tmp_path))
+    without_admin = {key: value for key, value in env.items() if key != "POSTGRES_PASSWORD"}
+    assert migrate(without_admin).startswith("схема уже на последней версии")
+    owner_only = {key: env[key] for key in ("DATABASE_OWNER_URL", "DATA_DIR")}
+    assert load(owner_only).startswith("набор")
+    with pytest.raises(StartupError, match="POSTGRES_PASSWORD"):
+        bootstrap(without_admin)
+    with pytest.raises(StartupError, match="DATABASE_URL"):
+        migrate(owner_only)
+
+
+def test_unknown_step_is_rejected(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(["everything"])
+    assert caught.value.code == 2
+    with pytest.raises(SystemExit):
+        main([])

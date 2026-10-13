@@ -53,4 +53,5 @@ addopts = "-ra --strict-markers --strict-config"
 xfail_strict = true
 markers = [
     "db: тест ходит в PostgreSQL",
+    "migrations: проверка миграций — отдельный шаг CI, `make migrate-check`",
 ]

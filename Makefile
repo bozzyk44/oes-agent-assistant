@@ -10,7 +10,7 @@ COMPOSE_SMOKE := docker compose -p $(COMPOSE_PROJECT)-smoke
 # Файлы, которые контейнер пишет в каталоги хоста, принадлежат тому, кто запустил make.
 HOST_USER := $(shell id -u):$(shell id -g)
 
-.PHONY: help env data run down reset test eval smoke ci lock
+.PHONY: help env data run migrate migrate-check down reset test eval smoke ci lock
 
 help:
 	@echo "make data   — сгенерировать набор в data/"
@@ -19,8 +19,10 @@ help:
 	@echo "make reset  — остановить и удалить том базы"
 	@echo "make test   — линтер, типы и тесты, без сети и модели"
 	@echo "make eval   — прогон эталонных вопросов по запущенному сервису; QUESTIONS=<путь>"
+	@echo "make migrate — применить миграции к базе текущего запуска; повтор ничего не меняет"
+	@echo "make migrate-check — проверка миграций: пустая база, повтор, откат и снова, сверка моделей"
 	@echo "make smoke  — сценарий сборки: поднять всё с нуля и проверить связку"
-	@echo "make ci     — test и smoke на чистой копии текущего коммита; REPORT=1 — отметить коммит в GitHub"
+	@echo "make ci     — migrate-check, test и smoke на чистой копии текущего коммита; REPORT=1 — отметить коммит в GitHub"
 	@echo "make lock   — пересобрать uv.lock после правки зависимостей"
 
 env:
@@ -37,6 +39,20 @@ down:
 
 reset:
 	$(COMPOSE) down --volumes --remove-orphans
+
+# Миграции — отдельный шаг: тот же сервис compose, что стартует в `make run` между ролями
+# и загрузкой набора. PostgreSQL и шаг ролей поднимаются как зависимости.
+migrate: env
+	$(COMPOSE) run --rm --build migrate
+
+# Проверка миграций отдельным шагом CI: применение на пустую базу, повтор, откат каждой
+# миграции её собственным откатом и снова, сверка моделей со схемой. Эти же тесты входят
+# и в `make test`.
+migrate-check:
+	$(COMPOSE_TEST) build tests
+	@$(COMPOSE_TEST) run --rm tests pytest -p no:cacheprovider -m migrations; status=$$?; \
+	$(COMPOSE_TEST) down --volumes --remove-orphans >/dev/null 2>&1; \
+	exit $$status
 
 test:
 	$(COMPOSE_TEST) build tests

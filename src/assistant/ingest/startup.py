@@ -1,7 +1,7 @@
-"""Проверки загрузчика перед работой с базой.
+"""Проверки шагов запуска перед работой с базой.
 
-Загрузчик убеждается, что окружение заполнено настоящими значениями и что сервер
-PostgreSQL принимает вход администратора по сети.
+Шаги перед сервисом убеждаются, что окружение заполнено настоящими значениями, а шаг
+ролей и баз — что сервер PostgreSQL принимает вход администратора по сети.
 """
 
 from collections.abc import Mapping
@@ -11,7 +11,8 @@ import psycopg
 # Метка из .env.example: значение, которое `make run` заменяет случайным секретом.
 PLACEHOLDER = "__GENERATE__"
 
-# Переменные загрузчика. Токена ТОиР среди них нет: загрузчику он не нужен и не передаётся.
+# Переменные шага ролей и баз — самого требовательного. Шагам миграций и загрузки нужна
+# только часть: пароль администратора им не передаётся. Токена ТОиР нет ни у одного шага.
 REQUIRED = (
     "POSTGRES_PASSWORD",
     "DATABASE_OWNER_URL",
@@ -24,11 +25,11 @@ class StartupError(Exception):
     """Запуск невозможен; текст ошибки безопасно показывать: в нём нет значений переменных."""
 
 
-def check_environment(env: Mapping[str, str]) -> None:
-    missing = [name for name in REQUIRED if not env.get(name)]
+def check_environment(env: Mapping[str, str], required: tuple[str, ...] = REQUIRED) -> None:
+    missing = [name for name in required if not env.get(name)]
     if missing:
         raise StartupError("не заданы переменные окружения: " + ", ".join(missing))
-    unfilled = [name for name in REQUIRED if PLACEHOLDER in env[name]]
+    unfilled = [name for name in required if PLACEHOLDER in env[name]]
     if unfilled:
         raise StartupError(
             "в переменных остались метки из .env.example: "

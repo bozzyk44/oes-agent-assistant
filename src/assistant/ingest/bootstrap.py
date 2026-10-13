@@ -1,4 +1,4 @@
-"""Роли и базы сервера: идемпотентный шаг загрузчика под администратором PostgreSQL.
+"""Роли и базы сервера: идемпотентный шаг запуска под администратором PostgreSQL.
 
 Сценарии инициализации образа PostgreSQL выполняются только на пустом каталоге данных,
 поэтому поверх существующего тома не сработали бы. Этот шаг работает одинаково на новом
@@ -43,20 +43,30 @@ def read_account(variable: str, url: str) -> Account:
     return Account(variable, parsed.username, parsed.password, parsed.database)
 
 
+def read_pair(owner_url: str, service_url: str) -> tuple[Account, Account]:
+    """Владелец и роль сервиса: разные роли в одной базе."""
+    owner = read_account("DATABASE_OWNER_URL", owner_url)
+    service = read_account("DATABASE_URL", service_url)
+    if owner.role == service.role or "postgres" in (owner.role, service.role):
+        raise StartupError(
+            "DATABASE_OWNER_URL и DATABASE_URL должны называть две разные роли,"
+            " и ни одна из них — не администратор сервера"
+        )
+    if owner.database != service.database:
+        raise StartupError("DATABASE_OWNER_URL и DATABASE_URL должны вести в одну базу")
+    return owner, service
+
+
 def read_accounts(owner_url: str, service_url: str, toir_url: str) -> Accounts:
+    owner, service = read_pair(owner_url, service_url)
     accounts = Accounts(
-        owner=read_account("DATABASE_OWNER_URL", owner_url),
-        service=read_account("DATABASE_URL", service_url),
-        toir=read_account("TOIR_DATABASE_URL", toir_url),
+        owner=owner, service=service, toir=read_account("TOIR_DATABASE_URL", toir_url)
     )
-    roles = {accounts.owner.role, accounts.service.role, accounts.toir.role}
-    if len(roles) != 3 or "postgres" in roles:
+    if accounts.toir.role in (owner.role, service.role, "postgres"):
         raise StartupError(
             "DATABASE_OWNER_URL, DATABASE_URL и TOIR_DATABASE_URL должны называть три разные"
             " роли, и ни одна из них — не администратор сервера"
         )
-    if accounts.owner.database != accounts.service.database:
-        raise StartupError("DATABASE_OWNER_URL и DATABASE_URL должны вести в одну базу")
     if accounts.toir.database == accounts.service.database:
         raise StartupError("TOIR_DATABASE_URL должен вести в отдельную базу")
     return accounts
