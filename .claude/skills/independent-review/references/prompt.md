@@ -2,7 +2,7 @@
 
 Запрос пишется по-английски, отчёт запрашивается по-русски. Замени всё в угловых скобках. Постоянная часть и формат отчёта идут в запрос всегда и не сокращаются; блоки проверок бери по таблице из `SKILL.md`, лишние удали.
 
-Оглавление: постоянная часть · блоки проверок (одиннадцать) · формат отчёта.
+Оглавление: постоянная часть · добавка для повторного круга · блоки проверок (одиннадцать) · формат отчёта.
 
 ## Постоянная часть
 
@@ -44,7 +44,24 @@ The employer will run the service with `make run` / `docker compose up` on THEIR
 
 <what the author says was verified and how — as a claim to check against the code, not as a fact>
 
-<for a repeat review: what the author says was fixed since the previous review; verify each fix is present, coherent, and did not introduce new problems>
+<for a repeat round: insert the block from «Добавка для повторного круга» here>
+```
+
+### Добавка для повторного круга
+
+Вставляется в конец постоянной части. Блоки проверок — только по тому, что менялось в правках.
+
+```
+## This is review round <N>
+
+A previous round reviewed commit <old sha>. Since then the author made fixes. Your scope is narrower than a full review:
+
+- See the fixes with: git -C <worktree> diff <old sha>..HEAD. The full change (git -C <worktree> diff origin/main) is background: read what you need to judge the fixes, do not re-review it line by line.
+- The author says these findings were fixed: <numbered list: what was wrong → what was changed>. For each, verify the fix is present, actually addresses the problem, and did not break something else. Do not take the list on trust.
+- These findings were deliberately rejected or left open; do not report them again unless the stated reason is wrong: <list with reasons>.
+- Also look for new problems introduced by the fixes themselves, and for places the fixes made documents contradict each other.
+
+Report only critical and major findings in full. List minor ones as single lines at the end without analysis; they will not be fixed in this round.
 ```
 
 ## Блоки проверок
