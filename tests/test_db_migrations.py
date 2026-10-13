@@ -15,7 +15,7 @@ from sqlalchemy import Engine, create_engine, inspect, text
 from assistant.db import models
 from assistant.db.grants import grant_service
 from assistant.db.migrate import (
-    SchemaOutdated,
+    SchemaMismatch,
     current_revision,
     downgrade,
     head_revision,
@@ -23,7 +23,7 @@ from assistant.db.migrate import (
     upgrade,
 )
 from assistant.ingest.__main__ import load, main, migrate
-from assistant.ingest.startup import connect_admin
+from assistant.ingest.startup import StartupError, connect_admin
 from tests.conftest import OWNER_PASSWORD, SERVICE_PASSWORD, Database
 from tests.smallset import write_small_dataset
 
@@ -78,7 +78,7 @@ def test_migrations_apply_to_empty_database_and_repeat_changes_nothing(empty: En
         assert current_revision(connection) is None
     assert _schemas(empty) == set()
     with empty.begin() as connection:
-        assert upgrade(connection) is True
+        assert upgrade(connection) == (None, head_revision())
     with empty.connect() as connection:
         assert current_revision(connection) == head_revision()
     assert _schemas(empty) == {"app", "dwh", "kb"}
@@ -86,7 +86,7 @@ def test_migrations_apply_to_empty_database_and_repeat_changes_nothing(empty: En
     assert first
     with empty.begin() as connection:
         # Повторное применение — пустой шаг.
-        assert upgrade(connection) is False
+        assert upgrade(connection) == (head_revision(), head_revision())
     assert _objects(empty) == first
 
 
@@ -102,7 +102,7 @@ def test_downgrade_to_base_and_upgrade_again_gives_the_same_schema(empty: Engine
     assert _schemas(empty) == set()
     assert _objects(empty) == []
     with empty.begin() as connection:
-        assert upgrade(connection) is True
+        assert upgrade(connection) == (None, head_revision())
     assert _objects(empty) == first
 
 
@@ -159,7 +159,7 @@ def test_loader_stops_on_outdated_schema(
         "DATABASE_OWNER_URL": database.url("test_owner", OWNER_PASSWORD, PROBE),
         "DATA_DIR": str(write_small_dataset(tmp_path)),
     }
-    with pytest.raises(SchemaOutdated, match="make migrate"):
+    with pytest.raises(SchemaMismatch, match="make migrate"):
         load(env)
     assert _schemas(empty) == set()
     for name, value in env.items():
@@ -174,3 +174,56 @@ def test_loader_stops_on_outdated_schema(
         grant_service(connection, database.accounts.service.role)
         require_head(connection)
     assert load(env).startswith("набор загружен")
+
+
+def test_database_newer_than_code_stops_both_steps(
+    database: Database,
+    empty: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Базу мигрировала более новая сборка: её версии нет среди миграций этой. Это не
+    # «схема отстала», и совет применить миграции был бы неверным.
+    with empty.begin() as connection:
+        upgrade(connection)
+        connection.execute(text("update alembic_version set version_num = '9999_future'"))
+    env = {
+        "DATABASE_OWNER_URL": database.url("test_owner", OWNER_PASSWORD, PROBE),
+        "DATABASE_URL": database.url("test_app", SERVICE_PASSWORD, PROBE),
+        "DATA_DIR": str(write_small_dataset(tmp_path)),
+    }
+    for step in (migrate, load):
+        with pytest.raises(SchemaMismatch, match="база новее кода") as caught:
+            step(env)
+        assert "make migrate" not in str(caught.value)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert main(["migrate"]) == 1
+    message = capsys.readouterr().err
+    assert message.startswith("migrate: в базе версия схемы 9999_future")
+    assert "Traceback" not in message
+    with empty.connect() as connection:
+        assert current_revision(connection) == "9999_future"
+
+
+@pytest.mark.parametrize(
+    ("service", "message"),
+    [
+        (("test_app", SERVICE_PASSWORD, "assistant_test"), "в одну базу"),
+        (("test_owner", OWNER_PASSWORD, PROBE), "две разные роли"),
+        (("postgres", "x", PROBE), "не администратор"),
+    ],
+)
+def test_migrate_step_checks_its_addresses(
+    database: Database, empty: Engine, service: tuple[str, str, str], message: str
+) -> None:
+    # Шаг запускается и отдельно, поэтому сам сверяет, кому и в какой базе выдаёт права.
+    env = {
+        "DATABASE_OWNER_URL": database.url("test_owner", OWNER_PASSWORD, PROBE),
+        "DATABASE_URL": database.url(*service),
+    }
+    with pytest.raises(StartupError, match=message):
+        migrate(env)
+    with empty.connect() as connection:
+        assert current_revision(connection) is None

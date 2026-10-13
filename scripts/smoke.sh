@@ -16,6 +16,9 @@ export SERVICE_PORT=0
 
 step() { printf '\n== %s\n' "$1"; }
 fail() { printf 'smoke: ПРОВАЛ — %s\n' "$1" >&2; exit 1; }
+# Первое событие не позже второго. Метки времени Docker — в одном формате и поясе,
+# поэтому строки сравниваются как время.
+not_later() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort | head -n 1)" = "$1" ]; }
 
 # Свой каталог набора с файлом-меткой: проверяется, что в контейнер попадает именно
 # каталог с хоста и что подмена DATA_DIR действует. Сам набор в него пишет генератор
@@ -97,9 +100,8 @@ for one_off in bootstrap migrate loader; do
     [ "$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$container")" = "exited 0" ] \
         || fail "шаг $one_off не завершился с кодом 0"
     started=$(docker inspect --format '{{.State.StartedAt}}' "$container")
-    # Метки времени в одном формате и поясе: строки сравниваются как время.
     if [ -n "$previous_done" ]; then
-        [ "$(printf '%s\n%s\n' "$previous_done" "$started" | sort | head -n 1)" = "$previous_done" ] \
+        not_later "$previous_done" "$started" \
             || fail "шаг $one_off стартовал раньше, чем завершился предыдущий"
     fi
     previous_done=$(docker inspect --format '{{.State.FinishedAt}}' "$container")
@@ -117,19 +119,23 @@ case "$($COMPOSE logs --no-log-prefix migrate 2>&1)" in
 esac
 
 step "загрузчик завершился до старта сервиса и заглушки"
-loader=$($COMPOSE ps --all --quiet loader)
-loader_done=$(docker inspect --format '{{.State.FinishedAt}}' "$loader")
+# После цикла выше в переменных — последний шаг, загрузчик.
+loader=$container
 for service in assistant toir; do
     started=$(docker inspect --format '{{.State.StartedAt}}' "$($COMPOSE ps --quiet "$service")")
-    # Метки времени в одном формате и поясе: строки сравниваются как время.
-    [ "$(printf '%s\n%s\n' "$loader_done" "$started" | sort | head -n 1)" = "$loader_done" ] \
+    not_later "$previous_done" "$started" \
         || fail "$service стартовал раньше, чем завершился загрузчик"
 done
 
 step "make migrate поверх работающего запуска ничего не меняет"
-case "$($MAKE migrate COMPOSE_PROJECT="$SMOKE_PROJECT" 2>&1)" in
+# Разовый контейнер удаляется сразу, журнала от него не остаётся: вывод печатается здесь.
+migrate_out=$($MAKE migrate COMPOSE_PROJECT="$SMOKE_PROJECT" 2>&1) || true
+case "$migrate_out" in
     *"схема уже на последней версии"*) ;;
-    *) fail "повторное применение миграций что-то изменило или не прошло" ;;
+    *)
+        printf '%s\n' "$migrate_out" | tail -n 30 >&2
+        fail "повторное применение миграций что-то изменило или не прошло"
+        ;;
 esac
 
 step "набор сценария загружен, база под ролью сервиса в порядке"

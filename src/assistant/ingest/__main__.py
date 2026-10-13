@@ -18,12 +18,13 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import psycopg
+from alembic.util import CommandError
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from assistant.db.grants import grant_service
-from assistant.db.migrate import SchemaOutdated, current_revision, require_head, upgrade
-from assistant.ingest.bootstrap import ensure_roles_and_databases, read_account, read_accounts
+from assistant.db.migrate import SchemaMismatch, require_head, upgrade
+from assistant.ingest.bootstrap import ensure_roles_and_databases, read_accounts, read_pair
 from assistant.ingest.dataset import DatasetError, read_dataset
 from assistant.ingest.load import LOADER_VERSION, load_dataset
 from assistant.ingest.startup import REQUIRED, StartupError, check_environment, connect_admin
@@ -49,18 +50,18 @@ def bootstrap(env: Env) -> str:
 def migrate(env: Env) -> str:
     """Миграции и права роли сервиса. Повторный запуск ничего не меняет."""
     check_environment(env, ("DATABASE_OWNER_URL", "DATABASE_URL"))
-    service = read_account("DATABASE_URL", env["DATABASE_URL"])
+    # Шаг запускается и отдельно от остальных, поэтому адреса сверяет сам: права роли
+    # сервиса выдаются именно в той базе, которую мигрирует владелец, и не ему самому.
+    _, service = read_pair(env["DATABASE_OWNER_URL"], env["DATABASE_URL"])
     engine = create_engine(env["DATABASE_OWNER_URL"])
     try:
         with engine.begin() as connection:
-            before = current_revision(connection)
-            changed = upgrade(connection)
+            before, after = upgrade(connection)
             # Права выдаются при каждом запуске: имя роли приходит из окружения.
             grant_service(connection, service.role)
-            after = current_revision(connection)
     finally:
         engine.dispose()
-    if changed:
+    if before != after:
         return f"миграции применены: {before or 'пустая база'} -> {after}"
     return f"схема уже на последней версии: {after}"
 
@@ -97,8 +98,11 @@ def main(argv: list[str] | None = None) -> int:
     step: str = parser.parse_args(argv).step
     try:
         print(f"{step}: {STEPS[step](os.environ)}")
-    except (StartupError, DatasetError, SchemaOutdated) as exc:
+    except (StartupError, DatasetError, SchemaMismatch) as exc:
         print(f"{step}: {exc}", file=sys.stderr)
+        return 1
+    except CommandError as exc:
+        print(f"{step}: миграции не применены: {exc}", file=sys.stderr)
         return 1
     except (psycopg.Error, SQLAlchemyError) as exc:
         # Только первая строка ошибки сервера: без текста запроса и его параметров.
