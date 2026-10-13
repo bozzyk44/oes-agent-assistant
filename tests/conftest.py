@@ -40,7 +40,7 @@ TOIR_PASSWORD = "test-toir-password-marker-c240"
 
 @dataclass(frozen=True)
 class Database:
-    """Сервер тестов с ролями, базами и схемой — как после загрузчика, но без набора."""
+    """Сервер тестов с ролями, базами и схемой — как после шагов ролей и миграций, без набора."""
 
     host: str
     port: int

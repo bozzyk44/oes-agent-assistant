@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from psycopg import sql
-from sqlalchemy import Engine, create_engine, inspect, text
+from sqlalchemy import Connection, Engine, create_engine, inspect, text
 
 from assistant.db import models
 from assistant.db.grants import grant_service
@@ -52,25 +52,84 @@ def _schemas(engine: Engine) -> set[str]:
     return set(inspect(engine).get_schema_names()) & {"app", "dwh", "kb"}
 
 
-def _objects(engine: Engine) -> list[tuple[str, ...]]:
-    """Слепок схемы: таблицы с колонками, политики, функции и триггеры."""
+def _queries() -> tuple[str, ...]:
+    """Слепок схемы: всё, что миграция создаёт и что откат обязан убрать или вернуть.
+
+    Кроме трёх схем проекта в слепок входят объекты схемы `public`: миграция, которая
+    оставит там тип или последовательность, тоже должна быть замечена.
+    """
     queries = (
-        "select 'column', table_schema, table_name, column_name, data_type, is_nullable"
-        " from information_schema.columns where table_schema in ('app', 'dwh', 'kb')",
-        "select 'policy', schemaname, tablename, policyname, cmd, coalesce(qual, '')"
-        " from pg_policies",
+        "select 'column', table_schema, table_name, column_name, data_type, is_nullable,"
+        " coalesce(column_default, ''), is_identity, coalesce(generation_expression, '')"
+        " from information_schema.columns where table_schema in OURS"
+        " and table_name <> 'alembic_version'",
+        # Флаги построчной защиты — на самой таблице, а не в политиках.
+        "select 'table', n.nspname, c.relname, c.relkind::text, c.relrowsecurity::text,"
+        " c.relforcerowsecurity::text, coalesce(c.relacl::text, ''), '', ''"
+        " from pg_class c join pg_namespace n on n.oid = c.relnamespace"
+        " where n.nspname in OURS and c.relkind in ('r', 'S', 'v', 'm')"
+        " and c.relname <> 'alembic_version'",
+        "select 'index', schemaname, tablename, indexname, indexdef, '', '', '', ''"
+        " from pg_indexes where schemaname in OURS and tablename <> 'alembic_version'",
+        "select 'policy', schemaname, tablename, policyname, cmd, coalesce(qual, ''),"
+        " coalesce(with_check, ''), roles::text, permissive from pg_policies",
         "select 'function', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),"
-        " p.prosecdef::text, '' from pg_proc p join pg_namespace n on n.oid = p.pronamespace"
-        " where n.nspname in ('app', 'dwh', 'kb')",
+        " pg_get_functiondef(p.oid), coalesce(p.proacl::text, ''), '', '', ''"
+        " from pg_proc p join pg_namespace n on n.oid = p.pronamespace"
+        " where n.nspname in OURS",
         "select 'trigger', event_object_schema, event_object_table, trigger_name,"
-        " event_manipulation, '' from information_schema.triggers",
+        " event_manipulation, action_timing, action_statement, '', ''"
+        " from information_schema.triggers",
         "select 'constraint', n.nspname, c.conrelid::regclass::text, c.conname, c.contype::text,"
-        " pg_get_constraintdef(c.oid) from pg_constraint c"
-        " join pg_namespace n on n.oid = c.connamespace where n.nspname in ('app', 'dwh', 'kb')",
+        " pg_get_constraintdef(c.oid), '', '', '' from pg_constraint c"
+        " join pg_namespace n on n.oid = c.connamespace where n.nspname in OURS"
+        " and c.conrelid::regclass::text <> 'alembic_version'",
+        "select 'type', n.nspname, t.typname, t.typtype::text, '', '', '', '', ''"
+        " from pg_type t join pg_namespace n on n.oid = t.typnamespace"
+        " where n.nspname in OURS and t.typtype in ('e', 'd')",
     )
+    return tuple(query.replace("OURS", "('app', 'dwh', 'kb', 'public')") for query in queries)
+
+
+def _snapshot_in(connection: Connection) -> list[tuple[str, ...]]:
+    return [
+        tuple(str(cell) for cell in row)
+        for query in _queries()
+        for row in connection.execute(text(query))
+    ]
+
+
+def _objects(engine: Engine) -> list[tuple[str, ...]]:
     with engine.connect() as connection:
-        rows = [tuple(row) for query in queries for row in connection.execute(text(query))]
-    return sorted(rows)
+        return sorted(_snapshot_in(connection))
+
+
+def test_snapshot_sees_what_a_careless_migration_could_lose(empty: Engine) -> None:
+    # Слепок годен как проверка отката, только если замечает каждое из этих изменений.
+    with empty.begin() as connection:
+        upgrade(connection)
+    base = _objects(empty)
+    kinds = {row[0] for row in base}
+    assert {"column", "table", "index", "policy", "function", "trigger", "constraint"} <= kinds
+    changes = (
+        "drop index kb.chunks_tsv",
+        "alter table dwh.production disable row level security",
+        "alter table app.actions alter column status drop default",
+        "grant execute on function kb.document_exists(text) to public",
+        "alter function kb.document_exists(text) reset search_path",
+        "drop trigger actions_guard on app.actions",
+        "alter policy sessions_by_owner on app.sessions with check (true)",
+        "create sequence public.leftover",
+        "create type public.leftover as enum ('a')",
+    )
+    for change in changes:
+        with empty.connect() as connection:
+            transaction = connection.begin()
+            connection.execute(text(change))
+            rows = _snapshot_in(connection)
+            transaction.rollback()
+        assert sorted(rows) != base, change
+    assert _objects(empty) == base
 
 
 def test_migrations_apply_to_empty_database_and_repeat_changes_nothing(empty: Engine) -> None:

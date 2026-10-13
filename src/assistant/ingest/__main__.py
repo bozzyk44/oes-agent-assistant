@@ -102,7 +102,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{step}: {exc}", file=sys.stderr)
         return 1
     except CommandError as exc:
-        print(f"{step}: миграции не применены: {exc}", file=sys.stderr)
+        # Каталог миграций или таблица версий не в порядке: несколько последних версий
+        # либо несколько строк версии в базе.
+        print(f"{step}: версия схемы не определена: {exc}", file=sys.stderr)
         return 1
     except (psycopg.Error, SQLAlchemyError) as exc:
         # Только первая строка ошибки сервера: без текста запроса и его параметров.

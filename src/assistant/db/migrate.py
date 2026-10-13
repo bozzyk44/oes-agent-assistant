@@ -7,9 +7,11 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from alembic.util import CommandError
-from sqlalchemy import Connection
+from sqlalchemy import Connection, text
 
 _MIGRATIONS = Path(__file__).parent / "migrations"
+# Ключ блокировки на время миграции: произвольное число, одно на проект.
+_LOCK_KEY = 7_035_011
 
 
 class SchemaMismatch(Exception):
@@ -58,6 +60,9 @@ def upgrade(connection: Connection) -> tuple[str | None, str]:
     """Доводит схему до последней версии. Возвращает версию до и после; на актуальной
     базе они совпадают и ничего не меняется.
     """
+    # Два шага миграций одновременно — `docker compose up` и `make migrate` из соседнего
+    # терминала — идут по очереди: второй ждёт первого и видит схему уже доведённой.
+    connection.execute(text("select pg_advisory_xact_lock(:key)"), {"key": _LOCK_KEY})
     before, head = current_revision(connection), head_revision()
     _reject_newer(before)
     if before != head:

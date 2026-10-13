@@ -16,9 +16,20 @@ export SERVICE_PORT=0
 
 step() { printf '\n== %s\n' "$1"; }
 fail() { printf 'smoke: ПРОВАЛ — %s\n' "$1" >&2; exit 1; }
-# Первое событие не позже второго. Метки времени Docker — в одном формате и поясе,
-# поэтому строки сравниваются как время.
-not_later() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort | head -n 1)" = "$1" ]; }
+# Метка времени Docker с дробной частью ровно в девять знаков: Docker отбрасывает
+# конечные нули, и без выравнивания «…00.5Z» оказалось бы позже «…00.123Z» как строка.
+stamp() {
+    whole=${1%Z}
+    seconds=${whole%%.*}
+    case "$whole" in *.*) fraction=${whole#*.} ;; *) fraction=0 ;; esac
+    printf '%s.%-9s' "$seconds" "$fraction" | tr ' ' '0'
+}
+# Первое событие не позже второго. Метки в одном поясе: выровненные строки
+# сравниваются как время.
+not_later() {
+    first=$(stamp "$1")
+    [ "$(printf '%s\n%s\n' "$first" "$(stamp "$2")" | sort | head -n 1)" = "$first" ]
+}
 
 # Свой каталог набора с файлом-меткой: проверяется, что в контейнер попадает именно
 # каталог с хоста и что подмена DATA_DIR действует. Сам набор в него пишет генератор
@@ -129,6 +140,7 @@ done
 
 step "make migrate поверх работающего запуска ничего не меняет"
 # Разовый контейнер удаляется сразу, журнала от него не остаётся: вывод печатается здесь.
+service_before=$(docker inspect --format '{{.Id}} {{.State.StartedAt}}' "$($COMPOSE ps --quiet assistant)")
 migrate_out=$($MAKE migrate COMPOSE_PROJECT="$SMOKE_PROJECT" 2>&1) || true
 case "$migrate_out" in
     *"схема уже на последней версии"*) ;;
@@ -137,6 +149,9 @@ case "$migrate_out" in
         fail "повторное применение миграций что-то изменило или не прошло"
         ;;
 esac
+# Отдельный шаг миграций работающий сервис не трогает: контейнер и время старта те же.
+service_after=$(docker inspect --format '{{.Id}} {{.State.StartedAt}}' "$($COMPOSE ps --quiet assistant)")
+[ "$service_before" = "$service_after" ] || fail "make migrate перезапустил или пересоздал сервис"
 
 step "набор сценария загружен, база под ролью сервиса в порядке"
 case "$($COMPOSE logs --no-log-prefix loader 2>&1)" in
