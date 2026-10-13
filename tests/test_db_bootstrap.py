@@ -102,6 +102,13 @@ def test_connection_rights_are_granted_by_name(database: Database) -> None:
     assert not _can_connect(database.url("test_app", SERVICE_PASSWORD, "toir_test"))
     assert not _can_connect(database.url("test_owner", OWNER_PASSWORD, "toir_test"))
     assert not _can_connect(database.url("test_toir", TOIR_PASSWORD, "assistant_test"))
+    # В служебную базу администратора роли приложения тоже не входят.
+    for role, password in (
+        ("test_app", SERVICE_PASSWORD),
+        ("test_owner", OWNER_PASSWORD),
+        ("test_toir", TOIR_PASSWORD),
+    ):
+        assert not _can_connect(database.url(role, password, "postgres"))
 
 
 def test_toir_role_owns_its_database(database: Database) -> None:

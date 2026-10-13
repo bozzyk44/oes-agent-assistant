@@ -1,6 +1,7 @@
 """Автомат действия на уровне базы: полная матрица «статус × переход»."""
 
 from itertools import count, product
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import Connection, text
@@ -12,6 +13,8 @@ from tests.conftest import Database
 
 pytestmark = pytest.mark.db
 
+# Идентификаторы свои на каждый запуск: база между тестами и запусками не откатывается.
+_RUN = uuid4().hex[:8]
 _numbers = count(1)
 # Как действие попадает в статус разрешёнными переходами.
 _PATH = {
@@ -34,11 +37,12 @@ def _move(connection: Connection, action_id: str, status: str) -> None:
 def _action(connection: Connection, status: str = "proposed") -> str:
     """Создаёт сессию, ход и действие под ролью сервиса и доводит до статуса."""
     number = next(_numbers)
-    action_id = f"a-{number}"
+    action_id = f"a-{_RUN}-{number}"
+    session_id, turn_id = f"s-act-{_RUN}-{number}", f"t-act-{_RUN}-{number}"
     bind_user(connection, "u-eng")
     connection.execute(
         text("insert into app.sessions (user_id, session_id) values ('u-eng', :s)"),
-        {"s": f"s-act-{number}"},
+        {"s": session_id},
     )
     connection.execute(
         text(
@@ -46,7 +50,7 @@ def _action(connection: Connection, status: str = "proposed") -> str:
             " model_calls, input_tokens, output_tokens, max_call_input_tokens, prefix_hash,"
             " latency_ms) values (:t, 'u-eng', :s, 'в', 'action', 'о', 1, 1, 1, 1, 'h', 1)"
         ),
-        {"t": f"t-act-{number}", "s": f"s-act-{number}"},
+        {"t": turn_id, "s": session_id},
     )
     connection.execute(
         text(
@@ -54,7 +58,7 @@ def _action(connection: Connection, status: str = "proposed") -> str:
             " values (:a, 'u-eng', :s, :t, 'create_repair_request',"
             """ '{"equipment_id": "EX-1", "priority": 2}')"""
         ),
-        {"a": action_id, "t": f"t-act-{number}", "s": f"s-act-{number}"},
+        {"a": action_id, "t": turn_id, "s": session_id},
     )
     for step in _PATH[status]:
         _move(connection, action_id, step)
@@ -65,15 +69,16 @@ def _action(connection: Connection, status: str = "proposed") -> str:
 def test_transition_matrix(database: Database, small: object, source: str, target: str) -> None:
     with database.service.begin() as connection:
         action_id = _action(connection, source)
-    if source == target:
-        return
+    # Диагональ тоже проверяется: обновление без перехода — например, второе из двух
+    # одновременных подтверждений — отклоняется, а не проходит молча.
     allowed = (source, target) in ACTION_TRANSITIONS
     try:
         with database.service.begin() as connection:
             _move(connection, action_id, target)
     except DBAPIError as error:
         assert not allowed, f"{source} -> {target} должен проходить"
-        assert "недопустимый переход" in str(error)
+        expected = "уже в статусе" if source == target else "недопустимый переход"
+        assert expected in str(error)
     else:
         assert allowed, f"{source} -> {target} должен отклоняться"
     with database.service.connect() as connection:
@@ -111,9 +116,10 @@ def test_idempotency_key_is_created_once_and_kept(database: Database, small: obj
         ("proposed", """params = '{"equipment_id": "EX-2"}'""", "только статус и результат"),
         ("proposed", "user_id = 'u-k1'", "только статус и результат"),
         ("proposed", "tool = 'other'", "только статус и результат"),
-        ("done", "request_id = 'R-2'", "вместе с переходом"),
-        ("failed", "failure_reason = 'другая'", "вместе с переходом"),
-        ("proposed", "request_id = 'R-1'", "вместе с переходом"),
+        ("done", "request_id = 'R-2'", "уже в статусе"),
+        ("failed", "failure_reason = 'другая'", "уже в статусе"),
+        ("proposed", "request_id = 'R-1'", "уже в статусе"),
+        ("confirming", "updated_at = now()", "уже в статусе"),
         ("confirming", "status = 'done'", "actions_request_iff_done"),
         ("confirming", "status = 'failed'", "actions_reason_iff_failed"),
     ],
@@ -150,19 +156,55 @@ def test_action_is_created_only_as_proposed(database: Database, small: object) -
             )
     with database.service.begin() as connection:
         other = _action(connection)
-        turn = connection.scalar(
-            text("select turn_id from app.actions where action_id = :a"), {"a": other}
-        )
+        session, turn = connection.execute(
+            text("select session_id, turn_id from app.actions where action_id = :a"), {"a": other}
+        ).one()
     # Освобождаем ход: действие удаляет владелец, роли сервиса удаление не дано.
     with database.owner.begin() as connection:
         connection.execute(text("delete from app.actions where action_id = :a"), {"a": other})
+    insert = (
+        "insert into app.actions (action_id, user_id, session_id, turn_id, tool, params{})"
+        " values (:a, 'u-eng', :s, :t, 'x', '{{}}'{})"
+    )
     with database.service.begin() as connection, pytest.raises(DBAPIError, match="proposed"):
         connection.execute(
+            text(insert.format(", status", ", 'confirming'")),
+            {"a": f"a-{_RUN}-confirmed", "s": session, "t": turn},
+        )
+    # Ключ и время создания ставит база, что бы ни передал код.
+    forced = "00000000-0000-0000-0000-000000000001"
+    with database.service.begin() as connection:
+        connection.execute(
+            text(insert.format(", idempotency_key, created_at", ", :k, '2000-01-01'")),
+            {"a": f"a-{_RUN}-forced", "s": session, "t": turn, "k": forced},
+        )
+        key, year = connection.execute(
             text(
-                "insert into app.actions (action_id, user_id, session_id, turn_id, tool, params,"
-                " status) values ('a-confirmed', 'u-eng', 's', :t, 'x', '{}', 'confirming')"
+                "select idempotency_key::text, extract(year from created_at)"
+                " from app.actions where action_id = :a"
             ),
-            {"t": turn},
+            {"a": f"a-{_RUN}-forced"},
+        ).one()
+    assert key != forced
+    assert year > 2000
+
+
+def test_action_author_is_turn_author(database: Database, small: object) -> None:
+    # На авторе действия держится проверка «подтверждает автор»: он тот же, что у хода.
+    with database.service.begin() as connection:
+        mine = _action(connection)
+        session, turn = connection.execute(
+            text("select session_id, turn_id from app.actions where action_id = :a"), {"a": mine}
+        ).one()
+    with database.owner.begin() as connection:
+        connection.execute(text("delete from app.actions where action_id = :a"), {"a": mine})
+    with database.service.begin() as connection, pytest.raises(DBAPIError, match="foreign key"):
+        connection.execute(
+            text(
+                "insert into app.actions (action_id, user_id, session_id, turn_id, tool, params)"
+                " values (:a, 'u-k1', :s, :t, 'x', '{}')"
+            ),
+            {"a": f"a-{_RUN}-foreign", "s": session, "t": turn},
         )
 
 

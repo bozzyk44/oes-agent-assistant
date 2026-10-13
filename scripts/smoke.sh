@@ -119,12 +119,19 @@ engine = create_engine(url)
 with engine.connect() as c:
     users = c.scalar(text('select count(*) from app.users'))
     hidden = c.scalar(text('select count(*) from dwh.production'))
+with engine.begin() as c:
+    # С привязкой к пользователю, у которого есть полномочие, строки видны: пустая
+    # таблица прошла бы проверку выше и без построчной защиты.
+    user = c.scalar(text(\"select user_id from app.kpi_grants where table_name = 'production' limit 1\"))
+    c.execute(text(\"select set_config('app.user_id', :u, true)\"), {'u': user or ''})
+    visible = c.scalar(text('select count(*) from dwh.production'))
     owned = c.scalar(text(\"select count(*) from pg_tables where tableowner = current_user\"))
-if not users:
-    sys.exit('пользователи не загружены')
+if not users or not visible:
+    sys.exit('пользователи не загружены или строки КХД не видны и с привязкой')
 if hidden or owned:
     sys.exit('роль сервиса видит строки КХД без привязки или владеет таблицами')
 try:
+    # Имя базы заглушки — из образца окружения: сценарий создаёт .env из него.
     create_engine(url.rsplit('/', 1)[0] + '/toir').connect()
 except OperationalError as error:
     # Именно отказ в праве подключения: «базы нет» или «сервер недоступен» — не он.

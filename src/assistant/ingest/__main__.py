@@ -48,6 +48,8 @@ def run(env: dict[str, str]) -> str:
         f"документов {len(dataset.documents)}, пользователей {len(dataset.users)},"
         f" строк КХД {len(dataset.production) + len(dataset.downtime) + len(dataset.equipment)}"
     )
+    if dataset.skipped:
+        counts += f"; пропущены файлы без frontmatter: {', '.join(dataset.skipped)}"
     if replaced:
         return f"набор загружен: {counts}; сессии и действия очищены"
     return f"набор не изменился: {counts}; сессии и действия сохранены"

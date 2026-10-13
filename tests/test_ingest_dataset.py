@@ -84,7 +84,6 @@ VIOLATIONS: list[tuple[str, Edit, str]] = [
         _replace("downtime.csv", "2026-01-02T03:30", "2026-01-02T03:30:00"),
         "downtime.csv:2: время",
     ),
-    ("нет frontmatter", _replace("docs/A1.md", "---\nid: A1", "id: A1"), "docs/A1.md:1:"),
     (
         "frontmatter не закрыт",
         _replace("docs/A1.md", "acl: [all]\n---", "acl: [all]\n"),
@@ -96,7 +95,29 @@ VIOLATIONS: list[tuple[str, Edit, str]] = [
     ("нет date", _replace("docs/A1.md", "date: 2026-01-10\n", ""), "поля «date»"),
     ("нет status", _replace("docs/A1.md", "status: active\n", ""), "поля «status»"),
     ("нет acl", _replace("docs/A1.md", "acl: [all]\n", ""), "поля «acl»"),
-    ("пустой acl", _replace("docs/A1.md", "acl: [all]", "acl: []"), "поля «acl»"),
+    ("acl без значения", _replace("docs/A1.md", "acl: [all]", "acl:"), "поля «acl»"),
+    (
+        "вложенный frontmatter",
+        _replace("docs/A1.md", "acl: [all]", "acl: {a: [b"),
+        "frontmatter не разобран",
+    ),
+    (
+        "supersedes не строка",
+        _replace("docs/R2.md", "supersedes: R1", "supersedes: [R1]"),
+        "supersedes",
+    ),
+    ("элемент не объект", _write("users.json", b'["u-eng"]'), "users.json[0]: ожидался объект"),
+    ("name не строка", _replace("users.json", '"name": "Инженер Главный"', '"name": 5'), "name"),
+    (
+        "kpi не списком",
+        _replace("users.json", '"production": ["K1"]', '"production": "K1"'),
+        "kpi.",
+    ),
+    (
+        "repair_requests не список",
+        _replace("users.json", '"repair_requests": []', '"repair_requests": "K1"'),
+        "users.json[2]: поле repair_requests",
+    ),
     ("id не имя файла", _replace("docs/A1.md", "id: A1", "id: A2"), "id не совпадает"),
     ("дата документа", _replace("docs/A1.md", "date: 2026-01-10", "date: 10 января"), "поле date"),
     ("нет такой даты", _replace("docs/A1.md", "date: 2026-01-10", "date: 2026-02-30"), "поле date"),
@@ -207,6 +228,46 @@ def test_unknown_fields_and_values_are_accepted(tmp_path: Path) -> None:
     assert dataset.users[0].kpi["fuel"] == ("K3",)
     assert dataset.users[-1].groups == () and dataset.users[-1].repair_requests == ()
     assert len(dataset.production) == 5
+
+
+def test_template_built_frontmatter_is_read(tmp_path: Path) -> None:
+    # Набор, собранный подстановкой в шаблон без оглядки на YAML, не останавливает запуск.
+    root = write_small_dataset(tmp_path)
+    _replace("docs/A1.md", "title: Памятка для всех", "title: Приказ № 12: об ответственных")(root)
+    _replace("docs/H1.md", "title: Положение об окладах", "title: Положение #7 об окладах")(root)
+    _replace("docs/H1.md", "acl: [hr]", "acl: hr, finance")(root)
+    _replace("docs/R1.md", "acl: [engineering, site-k1]", "acl: []")(root)
+    _replace("docs/R2.md", "title: Регламент ремонта", 'title: "Регламент: ремонт"')(root)
+    docs = {doc.doc_id: doc for doc in read_dataset(root, 1).documents}
+    # Двоеточие в названии — для YAML ошибка; решётка — комментарий, обрезающий название.
+    assert docs["A1"].title == "Приказ № 12: об ответственных"
+    assert docs["H1"].title == "Положение #7 об окладах"
+    assert docs["R2"].title == "Регламент: ремонт"
+    # Группы через запятую без скобок — список, а не одна группа с запятой в имени.
+    assert docs["H1"].acl == ("hr", "finance")
+    # Пустой список — документ не доступен никому: значение допустимое.
+    assert docs["R1"].acl == ()
+
+
+def test_file_without_frontmatter_is_skipped_and_named(tmp_path: Path) -> None:
+    root = write_small_dataset(tmp_path)
+    (root / "docs" / "README.md").write_text("# Заметки к набору\n", encoding="utf-8")
+    dataset = read_dataset(root, 1)
+    assert dataset.skipped == ("docs/README.md",)
+    assert [doc.doc_id for doc in dataset.documents] == ["A1", "H1", "R1", "R2"]
+    for path in (root / "docs").glob("[A-Z][0-9].md"):
+        path.unlink()
+    with pytest.raises(DatasetError, match="ни в одном файле"):
+        read_dataset(root, 1)
+
+
+def test_null_in_optional_user_fields_is_absence(tmp_path: Path) -> None:
+    root = write_small_dataset(tmp_path)
+    users = json.loads((root / "users.json").read_text(encoding="utf-8"))
+    users[3].update(name=None, position=None, groups=None, kpi=None, repair_requests=None)
+    (root / "users.json").write_text(json.dumps(users, ensure_ascii=False), encoding="utf-8")
+    user = read_dataset(root, 1).users[3]
+    assert (user.name, user.groups, user.kpi, user.repair_requests) == ("", (), {}, ())
 
 
 def test_frontmatter_values_are_text_not_guessed_types(tmp_path: Path) -> None:

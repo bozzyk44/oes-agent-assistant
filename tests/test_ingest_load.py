@@ -184,8 +184,11 @@ def test_loader_end_to_end_is_idempotent(database: Database, tmp_path: Path) -> 
         (root / "production.csv").read_text(encoding="utf-8") + "2026-01-03,1,K1,123\n",
         encoding="utf-8",
     )
+    (root / "docs" / "README.md").write_text("без frontmatter\n", encoding="utf-8")
     env = _env(database, root)
-    assert run(env).startswith("набор загружен: документов 4, пользователей 4, строк КХД 12")
+    message = run(env)
+    assert message.startswith("набор загружен: документов 4, пользователей 4, строк КХД 12")
+    assert "пропущены файлы без frontmatter: docs/README.md" in message
     _leave_state(database, "u-k1")
     # Повторный запуск: роли, миграции и права на месте, набор тот же.
     assert run(env).startswith("набор не изменился")

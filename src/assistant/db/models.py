@@ -8,7 +8,16 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Integer, SmallInteger, Text
+from sqlalchemy import (
+    BigInteger,
+    Date,
+    DateTime,
+    FetchedValue,
+    ForeignKey,
+    Integer,
+    SmallInteger,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -25,6 +34,10 @@ ACTION_TRANSITIONS = frozenset(
 OUTCOMES = ("answer", "refusal", "no_data", "action", "budget_exceeded", "error")
 
 
+# Значение ставит база: после вставки модель читает его оттуда, а не считает пустым.
+_BY_DB = FetchedValue()
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -35,7 +48,7 @@ class DatasetVersion(Base):
 
     singleton: Mapped[bool] = mapped_column(primary_key=True)
     content_hash: Mapped[str] = mapped_column(Text)
-    loaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    loaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_BY_DB)
 
 
 class User(Base):
@@ -81,7 +94,7 @@ class Session(Base):
     # Отметка занятости: срок и случайная метка захвата; обе пусты, когда сессия свободна.
     busy_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     capture_token: Mapped[UUID | None]
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_BY_DB)
 
 
 class Turn(Base):
@@ -94,7 +107,7 @@ class Turn(Base):
     question: Mapped[str] = mapped_column(Text)
     outcome: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text)
-    citations: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    citations: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=_BY_DB)
     model_calls: Mapped[int] = mapped_column(Integer)
     input_tokens: Mapped[int] = mapped_column(Integer)
     cached_input_tokens: Mapped[int | None] = mapped_column(Integer)
@@ -103,8 +116,8 @@ class Turn(Base):
     prefix_hash: Mapped[str] = mapped_column(Text)
     latency_ms: Mapped[int] = mapped_column(Integer)
     # Запись хода для диагностики: то, что видела модель от имени автора.
-    record: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    record: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=_BY_DB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_BY_DB)
 
 
 class Message(Base):
@@ -118,7 +131,7 @@ class Message(Base):
     seq: Mapped[int] = mapped_column(Integer)
     role: Mapped[str] = mapped_column(Text)
     content: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(Text))
+    chunk_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=_BY_DB)
 
 
 class Action(Base):
@@ -131,13 +144,13 @@ class Action(Base):
     turn_id: Mapped[str] = mapped_column(ForeignKey("app.turns.turn_id"))
     tool: Mapped[str] = mapped_column(Text)
     params: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    status: Mapped[str] = mapped_column(Text)
-    # Создаётся базой вместе со строкой и больше не меняется.
-    idempotency_key: Mapped[UUID]
+    status: Mapped[str] = mapped_column(Text, server_default=_BY_DB)
+    # Создаётся базой вместе со строкой и больше не меняется; после вставки читается из базы.
+    idempotency_key: Mapped[UUID] = mapped_column(server_default=_BY_DB)
     request_id: Mapped[str | None] = mapped_column(Text)
     failure_reason: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_BY_DB)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_BY_DB)
 
 
 class Production(Base):
@@ -204,6 +217,6 @@ class Chunk(Base):
     heading: Mapped[str] = mapped_column(Text)
     body: Mapped[str] = mapped_column(Text)
     # Идентификаторы и числа без стемминга: ищутся точным совпадением.
-    terms: Mapped[list[str]] = mapped_column(ARRAY(Text))
+    terms: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=_BY_DB)
     # Считает база: название, заголовок раздела и текст, «ё» приведена к «е».
-    tsv: Mapped[Any] = mapped_column(TSVECTOR)
+    tsv: Mapped[Any] = mapped_column(TSVECTOR, server_default=_BY_DB)

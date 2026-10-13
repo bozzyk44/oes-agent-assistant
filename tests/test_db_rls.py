@@ -6,6 +6,7 @@
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import Connection, text
@@ -19,7 +20,28 @@ from tests.smallset import DOCS, USERS
 pytestmark = pytest.mark.db
 
 KPI = ("production", "downtime", "equipment")
-PROTECTED = ("dwh.production", "dwh.downtime", "dwh.equipment", "kb.chunks", "app.sessions")
+PROTECTED = (
+    "dwh.production",
+    "dwh.downtime",
+    "dwh.equipment",
+    "kb.chunks",
+    "app.sessions",
+    "app.turns",
+    "app.messages",
+)
+# Идентификаторы свои на каждый запуск: база между тестами и запусками не откатывается.
+_RUN = uuid4().hex[:8]
+
+TURN = (
+    "insert into app.turns (turn_id, user_id, session_id, question, outcome, answer,"
+    " model_calls, input_tokens, output_tokens, max_call_input_tokens, prefix_hash,"
+    " latency_ms) values (:t, :u, :s, 'вопрос', 'answer', 'ответ', 1, 10, 5, 10, 'h', 1)"
+)
+MESSAGE = (
+    "insert into app.messages (user_id, session_id, turn_id, seq, role, content)"
+    " values (:u, :s, :t, 1, 'user', '{}')"
+)
+SESSION = "insert into app.sessions (user_id, session_id) values (:u, :s)"
 
 
 def _sites(connection: Connection, table: str) -> list[str]:
@@ -73,6 +95,15 @@ def test_without_user_nothing_is_visible(
     database: Database, small: Path, binding: str | None
 ) -> None:
     # Забытая привязка даёт пустой результат, а не полный — включая документы для всех.
+    # В каждой таблице строки есть: пустая таблица прошла бы проверку и без защиты.
+    session = f"s-{_RUN}-{binding}"
+    with database.service.begin() as connection:
+        bind_user(connection, "u-eng")
+        connection.execute(text(SESSION), {"u": "u-eng", "s": session})
+        connection.execute(text(TURN), {"t": f"t-{session}", "u": "u-eng", "s": session})
+        connection.execute(text(MESSAGE), {"t": f"t-{session}", "u": "u-eng", "s": session})
+        for table in PROTECTED:
+            assert connection.scalar(text(f"select count(*) from {table}")), table  # noqa: S608
     with database.service.begin() as connection:
         if binding is not None:
             bind_user(connection, binding)
@@ -101,46 +132,47 @@ def test_binding_is_passed_as_value(database: Database, small: Path) -> None:
 
 
 def test_sessions_turns_and_messages_belong_to_owner(database: Database, small: Path) -> None:
-    turn = (
-        "insert into app.turns (turn_id, user_id, session_id, question, outcome, answer,"
-        " model_calls, input_tokens, output_tokens, max_call_input_tokens, prefix_hash,"
-        " latency_ms) values (:t, :u, 's-1', 'вопрос', 'answer', 'ответ', 1, 10, 5, 10, 'h', 1)"
-    )
-    message = (
-        "insert into app.messages (user_id, session_id, turn_id, seq, role, content)"
-        " values (:u, 's-1', :t, 1, 'user', '{}')"
-    )
+    session, turn = f"s-{_RUN}-own", f"t-{_RUN}-own"
+    mine = {"u": "u-eng", "s": session, "t": turn}
     with database.service.begin() as connection:
         bind_user(connection, "u-eng")
-        connection.execute(
-            text("insert into app.sessions (user_id, session_id) values ('u-eng', 's-1')")
-        )
-        connection.execute(text(turn), {"t": "t-rls-eng", "u": "u-eng"})
-        connection.execute(text(message), {"t": "t-rls-eng", "u": "u-eng"})
+        connection.execute(text(SESSION), mine)
+        connection.execute(text(TURN), mine)
+        connection.execute(text(MESSAGE), mine)
+    count = "select count(*) from app.{} where session_id = :s"
     with database.service.begin() as connection:
         # Тот же session_id у другого пользователя — другая сессия: чужой он не видит.
         bind_user(connection, "u-k1")
         for table in ("sessions", "turns", "messages"):
-            assert connection.scalar(text(f"select count(*) from app.{table}")) == 0  # noqa: S608
-        connection.execute(
-            text("insert into app.sessions (user_id, session_id) values ('u-k1', 's-1')")
+            assert connection.scalar(text(count.format(table)), mine) == 0
+        connection.execute(text(SESSION), {"u": "u-k1", "s": session})
+        changed = connection.execute(
+            text("update app.sessions set busy_until = null where session_id = :s"), mine
         )
-        changed = connection.execute(text("update app.sessions set busy_until = null"))
         assert changed.rowcount == 1
+    foreign = {"u": "u-eng", "s": f"{session}-2", "t": f"{turn}-2"}
     for statement, params in (
-        ("insert into app.sessions (user_id, session_id) values ('u-eng', 's-2')", {}),
-        (turn, {"t": "t-rls-foreign", "u": "u-eng"}),
-        (message, {"t": "t-rls-eng", "u": "u-eng"}),
+        (SESSION, foreign),
+        (TURN, {**mine, "t": f"{turn}-2"}),
+        (MESSAGE, mine),
     ):
         with database.service.begin() as connection:
             bind_user(connection, "u-k1")
+            # Строку от чужого имени политика записать не даёт.
             with pytest.raises(DBAPIError, match="row-level security"):
                 connection.execute(text(statement), params)
     with database.service.begin() as connection:
+        bind_user(connection, "u-k1")
+        # Своё сообщение к чужому ходу: связь хода, сессии и владельца не сходится.
+        with pytest.raises(DBAPIError, match="foreign key"):
+            connection.execute(
+                text(MESSAGE.replace(", 1, 'user'", ", 2, 'user'")),
+                {"u": "u-k1", "s": session, "t": turn},
+            )
+    with database.service.begin() as connection:
         bind_user(connection, "u-eng")
-        mine = "select count(*) from app.{} where session_id in ('s-1', 's-2')"
-        assert connection.scalar(text(mine.format("sessions"))) == 1
-        assert connection.scalar(text(mine.format("messages"))) == 1
+        assert connection.scalar(text(count.format("sessions")), mine) == 1
+        assert connection.scalar(text(count.format("messages")), mine) == 1
 
 
 def test_document_exists_does_not_depend_on_access(database: Database, small: Path) -> None:
@@ -179,6 +211,8 @@ def test_equipment_site_is_known_without_table_grant(database: Database, small: 
         # Тому, кого приложение не знает, функция не отвечает — как и политики.
         ("u-nobody", "какой оклад у горного мастера", False),
         ("", "какой оклад у горного мастера", False),
+        # Знаки запроса и кавычки в словах функцию не роняют.
+        ("u-k1", "оклад | мастера & !горного: 'кавычка' c:\\каталог\\ д'Артаньян", True),
     ],
 )
 def test_best_match_is_closed(

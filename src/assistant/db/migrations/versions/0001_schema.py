@@ -75,6 +75,8 @@ create table app.turns (
     record jsonb not null default '{}',
     created_at timestamptz not null default now(),
     foreign key (user_id, session_id) references app.sessions on delete cascade,
+    -- На эту тройку ссылаются сообщения и действия: ход, сессия и владелец у них одни.
+    unique (turn_id, user_id, session_id),
     constraint turns_outcome check (
         outcome in ('answer', 'refusal', 'no_data', 'action', 'budget_exceeded', 'error')
     )
@@ -85,12 +87,13 @@ create table app.messages (
     message_id bigint generated always as identity primary key,
     user_id text not null,
     session_id text not null,
-    turn_id text not null references app.turns on delete cascade,
+    turn_id text not null,
     seq integer not null,
     role text not null,
     content jsonb not null,
     chunk_ids text[] not null default '{}',
-    foreign key (user_id, session_id) references app.sessions on delete cascade,
+    foreign key (turn_id, user_id, session_id)
+        references app.turns (turn_id, user_id, session_id) on delete cascade,
     unique (turn_id, seq)
 );
 create index messages_session on app.messages (user_id, session_id, message_id);
@@ -100,7 +103,7 @@ create table app.actions (
     user_id text not null references app.users on delete cascade,
     session_id text not null,
     -- В одном ходе — не больше одного действия.
-    turn_id text not null unique references app.turns on delete cascade,
+    turn_id text not null unique,
     tool text not null,
     params jsonb not null,
     status text not null default 'proposed',
@@ -113,13 +116,18 @@ create table app.actions (
     constraint actions_status check (
         status in ('proposed', 'confirming', 'done', 'rejected', 'failed')
     ),
+    -- Автор действия — автор хода: на него опирается проверка «подтверждает автор».
+    foreign key (turn_id, user_id, session_id)
+        references app.turns (turn_id, user_id, session_id) on delete cascade,
     constraint actions_request_iff_done check ((status = 'done') = (request_id is not null)),
     constraint actions_reason_iff_failed check ((status = 'failed') = (failure_reason is not null))
 );
 """
 
 # Автомат действия держит база: условное обновление в коде — первая проверка, триггер —
-# вторая. Недопустимый переход, правка завершённого действия или смена ключа — ошибка.
+# вторая. Строка действия меняется только переходом статуса: любое обновление без перехода —
+# ошибка, поэтому второе из двух одновременных подтверждений не проходит молча.
+# Ключ идемпотентности и время создания ставит база, что бы ни передал код.
 ACTIONS_GUARD = """
 create function app.actions_guard() returns trigger
 language plpgsql
@@ -131,6 +139,9 @@ begin
             raise exception 'действие создаётся в статусе proposed, а не %', new.status
                 using errcode = 'check_violation';
         end if;
+        new.idempotency_key := gen_random_uuid();
+        new.created_at := now();
+        new.updated_at := new.created_at;
         return new;
     end if;
 
@@ -148,13 +159,9 @@ begin
     end if;
 
     if new.status = old.status then
-        if new.request_id is distinct from old.request_id
-            or new.failure_reason is distinct from old.failure_reason
-        then
-            raise exception 'результат действия % записывается вместе с переходом', old.action_id
-                using errcode = 'check_violation';
-        end if;
-        return new;
+        raise exception 'действие % уже в статусе %: строка меняется только переходом',
+            old.action_id, old.status
+            using errcode = 'check_violation';
     end if;
 
     if (old.status, new.status) not in (
@@ -318,10 +325,24 @@ as $$
 $$;
 
 -- Один бит: лучший по рангу действующий фрагмент среди всех документов закрыт для
--- текущего пользователя. Слова с цифрами в сравнении не участвуют, совпадение одного
--- слова признаком не считается: по функции нельзя подбирать содержимое закрытого документа.
+-- текущего пользователя. Слова с цифрами в сравнении не участвуют, поэтому числа закрытого
+-- документа — оклады, суммы — перебором не подобрать. Совпадение одного слова признаком
+-- не считается. Остаточный канал назван прямо: зная одно слово закрытого фрагмента, можно
+-- проверить, стоит ли рядом с ним другое слово без цифр.
 -- Без привязки и для пользователя, которого нет в app.users, ответ всегда «нет» — как
 -- и политики, функция ничего не сообщает тому, кого приложение не знает.
+-- Лексема в записи запроса: в кавычках, обратная черта и кавычка внутри удвоены.
+create function kb.lexeme(p_lexeme text) returns text
+language sql immutable
+set search_path = pg_catalog, pg_temp
+as $$
+    select chr(39)
+        || replace(
+            replace(p_lexeme, chr(92), repeat(chr(92), 2)), chr(39), repeat(chr(39), 2)
+        )
+        || chr(39)
+$$;
+
 create function kb.best_match_is_closed(p_query text) returns boolean
 language sql stable security definer
 set search_path = pg_catalog, pg_temp
@@ -339,7 +360,7 @@ as $$
     query as (
         select
             words.lexemes,
-            (select string_agg(quote_literal(l), ' | ') from unnest(words.lexemes) l)::tsquery as q
+            (select string_agg(kb.lexeme(l), ' | ') from unnest(words.lexemes) l)::tsquery as q
         from words
     ),
     best as (
@@ -347,7 +368,7 @@ as $$
             c.acl,
             (
                 select count(*) from unnest(query.lexemes) l
-                where c.tsv @@ quote_literal(l)::tsquery
+                where c.tsv @@ kb.lexeme(l)::tsquery
             ) as matched
         from kb.chunks c, query
         where query.q is not null and c.status = 'active' and c.tsv @@ query.q
@@ -374,6 +395,7 @@ $$;
 revoke all on function kb.document_exists(text) from public;
 revoke all on function dwh.equipment_site(text) from public;
 revoke all on function kb.best_match_is_closed(text) from public;
+revoke all on function kb.lexeme(text) from public;
 """
 
 
