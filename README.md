@@ -28,6 +28,7 @@
 | Состав стенда и лимиты | [docs/architecture/INFRASTRUCTURE.md](docs/architecture/INFRASTRUCTURE.md) |
 | Как создать и удалить стенд в облаке | [docs/development/STAND.md](docs/development/STAND.md) |
 | Правила для ИИ-агента: инварианты задания, лимиты, порядок работы с git | [CLAUDE.md](CLAUDE.md) |
+| Процедуры для ИИ-агента: путь задачи до PR и независимое ревью | [.claude/skills/](.claude/skills/) |
 | Задачи с критериями приёмки | [Issues](https://github.com/bozzyk44/oes-agent-assistant/issues) |
 
 Каждая задача идёт своей веткой: PR, CI, ревью агентом, ревью человека, squash-merge. Первый коммит с документами сделан напрямую в `main`, дальше — только через PR.
