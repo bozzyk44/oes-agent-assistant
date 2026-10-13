@@ -67,6 +67,16 @@ case "$(DATA_DIR=data/ $COMPOSE config 2>&1)" in
     *) fail "DATA_DIR=data/ не превратился в каталог data проекта" ;;
 esac
 
+step "data/ в репозитории — ровно то, что пишет генератор"
+# Генератор пишет в свой каталог, а не в data/: сценарий сборки набор не трогает.
+# Сверка стоит здесь, а не в make test: тесты обязаны проходить и с чужим набором в data/.
+mkdir -p "$PWD/.smoke/generated"
+$COMPOSE --profile tools run --rm --build -T --user "$(id -u):$(id -g)" \
+    --volume "$PWD/.smoke/generated:/out" datagen python -m datagen --out /out >/dev/null \
+    || fail "генератор не прошёл собственную проверку"
+diff -r "$PWD/.smoke/generated" "$PWD/data" \
+    || fail "data/ отличается от выхода генератора: запустите make data и закоммитьте результат"
+
 step "чистый старт"
 $COMPOSE down --volumes --remove-orphans >/dev/null 2>&1 || true
 $COMPOSE up --build --detach --wait

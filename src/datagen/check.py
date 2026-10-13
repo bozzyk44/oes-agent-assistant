@@ -399,8 +399,11 @@ def _check_downtime(
             problems.append(f"{where}: неизвестная причина «{reason}»")
         if equipment.get(equipment_id) != site:
             problems.append(f"{where}: оборудования нет в equipment.csv или участок другой")
-        # Смена 2 последнего дня заканчивается утром следующего.
-        if period and not period[0] <= start.date() <= period[1] + timedelta(days=1):
+        # Период — от начала смены 1 первого дня до конца смены 2 последнего, утром следующего.
+        if period and not (
+            datetime.combine(period[0], PERIOD_START_TIME) <= start
+            and end <= datetime.combine(period[1] + timedelta(days=1), PERIOD_START_TIME)
+        ):
             problems.append(f"{where}: простой вне периода добычи")
         count += 1
         reasons.add((site, reason))
@@ -512,10 +515,15 @@ def _check_memo(root: Path, world: World, memo: DocFile, problems: list[str]) ->
             minutes[row[4]] += int((_time(row[3]) - _time(row[2])).total_seconds()) // 60
     actual = [fmt_tenths(tenths_of_hours(value)) for value in minutes.values()]
     actual.append(fmt_tenths(tenths_of_hours(sum(minutes.values()))))
-    written = [fmt_tenths(line.hours_tenths) for line in world.memo]
-    written.append(fmt_tenths(sum(line.hours_tenths for line in world.memo)))
-    if f"| {written[-1]} |" not in memo.body:
-        problems.append(f"{memo.doc_id}: нет итога часов {written[-1]}")
+    total = fmt_tenths(sum(line.hours_tenths for line in world.memo))
+    if f"| {total} |" not in memo.body:
+        problems.append(f"{memo.doc_id}: нет итога часов {total}")
+    # Часы берутся из записанной таблицы, а не из параметров: сверяется то, что прочтёт сервис.
+    written = [
+        cells[-2].strip()
+        for cells in (line.split("|") for line in memo.body.split("\n") if line.startswith("| "))
+        if "," in cells[-2]
+    ]
     # Прогон сравнивает вхождением, поэтому мало, чтобы числа были разными:
     # ни одно не должно быть частью другого.
     for mine in written:

@@ -7,7 +7,8 @@ import re
 # по ней, длиннее порога у любой из измеренных моделей.
 CHARS_PER_TOKEN_UPPER = 5
 
-_SPACE_BETWEEN_DIGITS = re.compile(r"(?<=\d)\s+(?=\d)")
+# Только пробелы, обычный и неразрывный: перевод строки числа не склеивает.
+_SPACE_BETWEEN_DIGITS = re.compile(r"(?<=\d)[ \u00a0]+(?=\d)")
 _COMMA_BETWEEN_DIGITS = re.compile(r"(?<=\d),(?=\d)")
 
 

@@ -7,7 +7,6 @@
 import csv
 import filecmp
 import json
-import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -20,6 +19,7 @@ from datagen.render import INJECTION_PHRASE, render, write_dataset
 from datagen.text import fmt_tenths, min_tokens, normalize, tenths_of_hours
 from datagen.world import (
     DEFAULT_SEED,
+    EXCAVATOR,
     SECOND_SEED,
     SITES,
     World,
@@ -52,19 +52,6 @@ def test_other_seed_gives_other_numbers_and_ids() -> None:
     }
 
 
-@pytest.mark.skipif("DATASET_DIR" not in os.environ, reason="набор из репозитория не подключён")
-def test_repository_dataset_is_generator_output(tmp_path: Path) -> None:
-    # data/ в репозитории — ровно то, что пишет `make data`: правка руками была бы видна здесь.
-    committed = Path(os.environ["DATASET_DIR"])
-    write_dataset(build_world(DEFAULT_SEED), tmp_path)
-    names = _generated_files(tmp_path)
-    assert sorted(path.name for path in (committed / "docs").glob("*.md")) == sorted(
-        path.name for path in (tmp_path / "docs").glob("*.md")
-    )
-    assert filecmp.cmpfiles(committed, tmp_path, names, shallow=False)[1:] == ([], [])
-    assert check_dataset(committed) == []
-
-
 def test_dataset_passes_format_and_trap_checks(dataset: Dataset) -> None:
     root, world = dataset
     assert check_dataset(root) == []
@@ -93,7 +80,7 @@ def test_old_and_new_edition_send_different_excavators_to_ppr(dataset: Dataset) 
         elapsed = {
             row["equipment_id"]: int(row["motor_hours"]) - int(row["last_ppr_motor_hours"])
             for row in csv.DictReader(file)
-            if row["equipment_id"].startswith("EX")
+            if row["type"] == EXCAVATOR
         }
     due_old = {key for key, hours in elapsed.items() if hours >= periodicity(old.body)}
     due_new = {key for key, hours in elapsed.items() if hours >= periodicity(active.body)}
@@ -200,36 +187,80 @@ def _too_few_docs(root: Path, world: World) -> None:
         (root / "docs" / f"{world.docs[role].doc_id}.md").unlink()
 
 
+def _few_intervals(root: Path, world: World) -> None:
+    path = root / "downtime.csv"
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    path.write_text("".join(lines[:40]), encoding="utf-8")
+
+
+def _no_midnight(root: Path, world: World) -> None:
+    # Остаются только простои, начавшиеся и кончившиеся в одни сутки: дата до «T» та же.
+    def same_day(line: str) -> bool:
+        cells = line.split(",")
+        return cells[2][:10] == cells[3][:10]
+
+    _drop_line(root, "downtime.csv", same_day)
+
+
+def _time_with_seconds(root: Path, world: World) -> None:
+    start = world.downtime[0].start.strftime("%Y-%m-%dT%H:%M")
+    _edit(root, "downtime.csv", f",{start},", f",{start}:00,")
+
+
+def _downtime_before_period(root: Path, world: World) -> None:
+    row = world.downtime[0]
+    start = row.start.strftime("%Y-%m-%dT%H:%M")
+    early = world.start.strftime("%Y-%m-%dT03:00")
+    _edit(
+        root,
+        "downtime.csv",
+        f"{row.equipment_id},{row.site},{start},",
+        f"{row.equipment_id},{row.site},{early},",
+    )
+
+
+def _few_excavators(root: Path, world: World) -> None:
+    excavators = [item.equipment_id for item in world.equipment if item.type == EXCAVATOR]
+    gone = tuple(f"{equipment_id}," for equipment_id in excavators[6:])
+    _drop_line(root, "equipment.csv", lambda line: not line.startswith(gone))
+
+
 @pytest.mark.parametrize(
-    "damage",
+    ("damage", "message"),
     [
-        _break_header,
-        _quote_field,
-        _drop_reason,
-        _drop_day,
-        _level_anomaly,
-        _drop_profile,
-        _widen_site_head,
-        _open_closed_doc,
-        _break_edition_link,
-        _rename_doc,
-        _shorten_long_doc,
-        _too_few_docs,
+        (_break_header, "заголовок"),
+        (_quote_field, "без кавычек"),
+        (_drop_reason, "нет причин"),
+        (_drop_day, "подряд"),
+        (_level_anomaly, "в разы ниже"),
+        (_drop_profile, "специалиста по персоналу"),
+        (_widen_site_head, "начальника участка"),
+        (_open_closed_doc, "только для hr"),
+        (_break_edition_link, "superseded_by"),
+        (_rename_doc, "не совпадает с именем"),
+        (_shorten_long_doc, "не короче"),
+        (_too_few_docs, "документов"),
+        (_few_intervals, "интервалов"),
+        (_no_midnight, "полночь"),
+        (_time_with_seconds, "время не вида"),
+        (_downtime_before_period, "вне периода"),
+        (_few_excavators, "нужно не меньше"),
     ],
 )
 def test_format_check_catches_damage(
-    damage: Callable[[Path, World], None], dataset: Dataset, tmp_path: Path
+    damage: Callable[[Path, World], None], message: str, dataset: Dataset, tmp_path: Path
 ) -> None:
     root, world = dataset
     copy = tmp_path / "copy"
     shutil.copytree(root, copy)
     damage(copy, world)
-    assert check_dataset(copy) != []
+    # Порча должна попасться той проверке, ради которой сделана, а не случайной соседней.
+    assert any(message in problem for problem in check_dataset(copy))
     assert main(["--check", str(copy)]) == 1
 
 
 def _same_periodicity(root: Path, world: World) -> None:
-    # Обе редакции с одной периодичностью: на ППР пора одним и тем же экскаваторам.
+    # Прежняя редакция с периодичностью действующей: числа редакций перестали различаться.
     name = f"docs/{world.docs['ppr_old'].doc_id}.md"
     _edit(root, name, f"каждые {world.ppr_old} моточасов", f"каждые {world.ppr_new} моточасов")
 
@@ -300,27 +331,28 @@ def _memo_repeats_warehouse(root: Path, world: World) -> None:
 
 
 @pytest.mark.parametrize(
-    "damage",
+    ("damage", "message"),
     [
-        _swap_reaction_hours,
-        _drop_weather,
-        _ppr_without_reset,
-        _same_periodicity,
-        _reset_motor_hours,
-        _leak_salary,
-        _remove_instruction,
-        _open_memo,
-        _phone_in_order,
+        (_swap_reaction_hours, "со сроком реакции"),
+        (_drop_weather, "не объяснена"),
+        (_ppr_without_reset, "наработка после ППР"),
+        (_same_periodicity, "не та периодичность"),
+        (_reset_motor_hours, "одним и тем же"),
+        (_leak_salary, "встречается в"),
+        (_remove_instruction, "нет инструкции"),
+        (_open_memo, "не закрыта"),
+        (_phone_in_order, "есть телефон"),
+        (_memo_repeats_warehouse, "пересекаются"),
     ],
 )
 def test_trap_check_catches_damage(
-    damage: Callable[[Path, World], None], dataset: Dataset, tmp_path: Path
+    damage: Callable[[Path, World], None], message: str, dataset: Dataset, tmp_path: Path
 ) -> None:
     root, world = dataset
     copy = tmp_path / "copy"
     shutil.copytree(root, copy)
     damage(copy, world)
-    assert check_traps(copy, world) != []
+    assert any(message in problem for problem in check_traps(copy, world))
 
 
 def test_command_writes_checked_dataset_and_removes_stale_documents(tmp_path: Path) -> None:
