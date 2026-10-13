@@ -24,7 +24,9 @@ Text = Annotated[str, AfterValidator(_storable)]
 
 
 class TurnRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Лишние поля не мешают: клиент проверяющих может слать служебные, задание
+    # строгости не требует.
+    model_config = ConfigDict(extra="ignore")
 
     session_id: Text = Field(min_length=1, max_length=200)
     message: Text = Field(min_length=1)

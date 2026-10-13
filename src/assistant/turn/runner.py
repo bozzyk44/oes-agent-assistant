@@ -28,9 +28,7 @@ log = logging.getLogger(__name__)
 INTERNAL_ERROR = "Не удалось выполнить запрос: внутренняя ошибка сервиса."
 TIMEOUT_ERROR = "Не удалось выполнить запрос: превышен предел времени хода."
 LOST_CAPTURE_ERROR = "Не удалось выполнить запрос: ход не уложился в отведённый срок."
-MODEL_NOT_CONFIGURED = (
-    "Модель не настроена: задайте переменные MODEL_BASE_URL, MODEL_API_KEY и MODEL_NAME."
-)
+MODEL_NOT_CONFIGURED = "Модель не настроена: задайте переменные MODEL_BASE_URL и MODEL_NAME."
 LOOP_NOT_READY = "Агентный цикл ещё не подключён: сервис принимает запросы, но не отвечает."
 
 

@@ -44,6 +44,9 @@ mkdir -p "$smoke_data"
 export DATA_DIR="$smoke_data"
 # Имя модели задано только в окружении оболочки: в .env копии оно пустое.
 export MODEL_NAME="smoke-model-$$"
+# Адрес и ключ модели сценарий обнуляет: в рабочей копии .env — ссылка на настоящий,
+# и ход, проверяемый ниже, не должен уйти к настоящей модели.
+export MODEL_BASE_URL="" MODEL_API_KEY=""
 mkdir -p "$PWD/.smoke/q dir"
 : > "$PWD/.smoke/q dir/my questions.jsonl"
 
@@ -230,6 +233,8 @@ $MAKE eval COMPOSE_PROJECT="$SMOKE_PROJECT" QUESTIONS=".smoke/q dir/my questions
 
 step "ход: без заголовка — 401, без модели — ответ по контракту с outcome: error"
 # Адрес модели в сценарии пуст: сервис стартовал, а ход честно завершается ошибкой.
+[ -z "$($COMPOSE exec -T assistant printenv MODEL_BASE_URL)" ] \
+    || fail "адрес модели дошёл до сервиса: сценарий сборки не должен звать настоящую модель"
 $COMPOSE exec -T assistant python -c "
 import json, os, sys, urllib.error, urllib.request as u
 from sqlalchemy import create_engine, text

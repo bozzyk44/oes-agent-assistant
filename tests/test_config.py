@@ -40,11 +40,15 @@ def test_values_come_from_environment() -> None:
     assert settings.session_lease_seconds == 45.5
 
 
-@pytest.mark.parametrize("missing", ["MODEL_BASE_URL", "MODEL_API_KEY", "MODEL_NAME"])
-def test_model_needs_all_three_variables(missing: str) -> None:
+@pytest.mark.parametrize(
+    ("missing", "configured"),
+    [("MODEL_BASE_URL", False), ("MODEL_NAME", False), ("MODEL_API_KEY", True)],
+)
+def test_model_needs_address_and_name_but_not_a_key(missing: str, configured: bool) -> None:
+    # Локальному серверу модели ключ не нужен: без него модель всё равно задана.
     env = {**BASE, "MODEL_BASE_URL": "http://m/v1", "MODEL_API_KEY": "k", "MODEL_NAME": "n"}
     del env[missing]
-    assert load_settings(env).model.configured is False
+    assert load_settings(env).model.configured is configured
 
 
 def test_secrets_are_not_in_repr() -> None:

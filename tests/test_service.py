@@ -92,7 +92,12 @@ def test_no_header_is_401_not_422_and_no_turn_starts(service: Service, database:
     session = new_session()
     reply = service.turn(None, session)
     assert reply.status == 401
-    assert _session(database, "u-eng", session) is None
+    # Хода от имени «по умолчанию» нет — ни от чьего: сессия не появилась ни у кого.
+    with database.owner.connect() as connection:
+        created = connection.scalar(
+            text("select count(*) from app.sessions where session_id = :s"), {"s": session}
+        )
+    assert created == 0
     for path in ("/actions/a-1/confirm", "/actions/a-1/reject"):
         assert service.client.post(path).status_code == 401
 
@@ -204,7 +209,6 @@ def test_successful_turn_is_returned_and_stored(database: Database, small: Path)
         {"message": "м"},
         {"session_id": "", "message": "м"},
         {"session_id": "s", "message": ""},
-        {"session_id": "s", "message": "м", "user_id": "u-eng"},
         {"session_id": "s", "message": "м" * 201},
         {"session_id": "s" * 201, "message": "м"},
     ],
@@ -223,6 +227,30 @@ def test_user_is_checked_before_body(service: Service) -> None:
         for body in ({}, {"session_id": "s", "message": "м" * 201}, {"лишнее": 1}):
             response = service.client.post("/turn", json=body, headers=headers)
             assert response.status_code == 401, (headers, body)
+
+
+def test_extra_fields_in_body_are_ignored(service: Service) -> None:
+    # Клиент может слать служебные поля; пользователя из тела сервис не берёт.
+    response = service.client.post(
+        "/turn",
+        json={"session_id": new_session(), "message": "м", "user_id": "u-hr", "trace": {"a": 1}},
+        headers={"X-User-ID": "u-eng"},
+    )
+    assert response.status_code == 200
+    assert set(response.json()) == TURN_KEYS
+
+
+def test_unparseable_body_is_rejected_without_touching_the_database(
+    service: Service, database: Database
+) -> None:
+    for headers in ({}, {"X-User-ID": "u-eng"}):
+        response = service.client.post(
+            "/turn",
+            content=b'{"session_id":',
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        assert response.status_code == 422
+        assert "Traceback" not in response.text
 
 
 @pytest.mark.parametrize(
@@ -555,7 +583,24 @@ def test_process_does_not_start_with_placeholder_or_missing_secret(
 
 
 def test_handler_can_be_replaced_without_touching_the_frame(service: Service) -> None:
-    # Каркас — рамка: цикл с моделью встраивается подменой обработчика.
+    # Каркас — рамка: тело хода подменяется, не трогая захват сессии и запись. Действие
+    # в итог хода ещё не входит: рамка расширится вместе с записью.
     swapped = with_handler(service, Scripted())
     reply = swapped.turn("u-eng", new_session())
     assert (reply.body["outcome"], reply.body["answer"]) == ("answer", "ответ")
+
+
+def test_data_transactions_are_opened_only_through_the_bound_helper() -> None:
+    # Правило «транзакция с данными — только с привязкой к пользователю» держит не база
+    # (у app.actions построчной защиты нет), а то, что в коде сервиса нет другого способа
+    # открыть транзакцию. Единственное исключение — проверка готовности, без данных.
+    source = Path(__file__).resolve().parents[1] / "src" / "assistant"
+    found = []
+    for path in sorted(source.rglob("*.py")):
+        relative = path.relative_to(source).as_posix()
+        if relative.startswith(("db/", "ingest/")):
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if ".begin(" in line or ".connect(" in line:
+                found.append(f"{relative}:{number}")
+    assert len(found) == 1 and found[0].startswith("api/app.py:"), found
