@@ -8,3 +8,17 @@ __pycache__/
 *.sqlite3
 *.db
 .DS_Store
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+
+# Варианты файла окружения
+.env.*
+!.env.example

@@ -26,6 +26,7 @@
 | Чем доказана каждая гарантия | [docs/development/TESTING.md](docs/development/TESTING.md) |
 | Как измеряется поведение с моделью: прогон, сравнение, судья, мутанты | [docs/development/AI_TESTING.md](docs/development/AI_TESTING.md) |
 | Состав стенда и лимиты | [docs/architecture/INFRASTRUCTURE.md](docs/architecture/INFRASTRUCTURE.md) |
+| Как создать и удалить стенд в облаке | [docs/development/STAND.md](docs/development/STAND.md) |
 | Правила для ИИ-агента: инварианты задания, лимиты, порядок работы с git | [CLAUDE.md](CLAUDE.md) |
 | Задачи с критериями приёмки | [Issues](https://github.com/bozzyk44/oes-agent-assistant/issues) |
 
