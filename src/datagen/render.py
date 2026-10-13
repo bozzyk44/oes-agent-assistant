@@ -7,7 +7,7 @@ from pathlib import Path
 from string import Template
 
 from datagen.text import fmt_int, fmt_tenths
-from datagen.world import BUDGET_ITEMS, MONTHS, SITE_NAMES, SITES, Doc, World
+from datagen.world import BUDGET_ITEMS, SITE_NAMES, SITES, Doc, World
 
 _TEMPLATES = Path(__file__).parent / "templates"
 TIME_FORMAT = "%Y-%m-%dT%H:%M"
@@ -197,11 +197,10 @@ def _fields(world: World, doc: Doc) -> dict[str, object]:
                 )
             }
         case "memo":
-            previous = MONTHS[(world.start.month - 2) % 12]
             top = max(world.memo, key=lambda line: line.hours_tenths)
             return {
                 "site_name": SITE_NAMES[world.memo_site],
-                "period": f"{previous} {world.start.year} года",
+                "period": world.memo_period,
                 "memo_rows": _table(
                     [
                         (line.reason, line.count, fmt_tenths(line.hours_tenths))

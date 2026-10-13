@@ -6,10 +6,10 @@
 
 import calendar
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 
-from datagen.text import tenths_of_hours
+from datagen.text import fmt_tenths, tenths_of_hours
 
 DEFAULT_SEED = 20260901
 # Второй набор: на нём проверяется, что код и тесты не привязаны к содержимому data/.
@@ -214,6 +214,7 @@ class World:
     deputies: dict[str, Contact]
     contacts: tuple[Contact, ...]
     memo_site: str
+    memo_period: str
     memo: tuple[MemoLine, ...]
     injection_equipment: str
     docs: dict[str, Doc]
@@ -268,9 +269,15 @@ def build_world(seed: int) -> World:
     days_in_month = calendar.monthrange(year, month)[1]
     month_plan = {site: plan * len(SHIFTS) * days_in_month for site, plan in shift_plan.items()}
     production, anomaly = _production(rng, start, shift_plan)
-    downtime = _downtime(rng, equipment, below, start, anomaly)
+    ppr_duration_old = rng.choice((16, 20, 24))
+    ppr_duration_new = rng.choice((10, 12, 14))
+    downtime = _downtime(rng, equipment, below, start, anomaly, ppr_duration_new)
+    equipment = _align_ppr(rng, equipment, downtime, start)
+    salaries, budget, budget_spent = _closed_numbers(rng)
 
     memo_site = rng.choice(SITES)
+    # Записка — за месяц перед периодом набора; период внутри года, перехода через январь нет.
+    memo_period = f"{MONTHS[month - 2]} {year} года"
     excavators = [item.equipment_id for item in equipment if item.type == EXCAVATOR]
 
     return World(
@@ -285,31 +292,20 @@ def build_world(seed: int) -> World:
         month_plan=month_plan,
         ppr_old=ppr_old,
         ppr_new=ppr_new,
-        ppr_duration_old=rng.choice((16, 20, 24)),
-        ppr_duration_new=rng.choice((10, 12, 14)),
+        ppr_duration_old=ppr_duration_old,
+        ppr_duration_new=ppr_duration_new,
         reaction_hours={1: rng.choice((1, 2)), 2: rng.choice((6, 8, 12)), 3: rng.choice((48, 72))},
-        salaries=tuple(
-            # Оклад оканчивается на 50, плановые числа — на 00: совпасть они не могут.
-            Salary(position, rng.randrange(600, 2400) * 100 + 50, rng.randrange(10, 45, 5))
-            for position in _SALARY_POSITIONS
-        ),
-        budget={
-            site: {
-                item: rng.randrange(30_000, 150_000) * 100 + rng.choice((25, 50, 75))
-                for item in BUDGET_ITEMS
-            }
-            for site in SITES
-        },
-        budget_spent={
-            site: rng.randrange(40_000, 90_000) * 100 + rng.choice((15, 35, 85)) for site in SITES
-        },
+        salaries=salaries,
+        budget=budget,
+        budget_spent=budget_spent,
         responsibles=responsibles,
         deputies=deputies,
         contacts=contacts,
         memo_site=memo_site,
+        memo_period=memo_period,
         memo=_memo(rng, downtime, memo_site),
         injection_equipment=rng.choice(excavators),
-        docs=_docs(rng, month_start, memo_site),
+        docs=_docs(rng, month_start, memo_site, memo_period),
     )
 
 
@@ -460,24 +456,27 @@ def _downtime(
     below: set[str],
     start: date,
     anomaly: ProductionRow,
+    ppr_hours: int,
 ) -> tuple[Downtime, ...]:
     origin = datetime.combine(start, PERIOD_START_TIME)
     period = DAYS * DAY_MINUTES
     busy: dict[str, list[tuple[int, int]]] = {}
+    had_ppr: set[str] = set()
     rows: list[Downtime] = []
 
     def reasons_for(item: Equipment) -> list[str]:
-        # ППР за период согласуется с моточасами: его проходили только экскаваторы,
-        # у которых наработка после ППР мала.
+        # ППР за период — не больше одного на единицу, а у экскаваторов — только у тех,
+        # чья наработка после ППР ниже обоих порогов: иначе простой спорил бы с моточасами.
+        no_ppr = item.equipment_id in had_ppr or (
+            item.type == EXCAVATOR and item.equipment_id not in below
+        )
         return [
-            reason
-            for reason in _REASONS_BY_TYPE[item.type]
-            if not (reason == "ППР" and item.type == EXCAVATOR and item.equipment_id not in below)
+            reason for reason in _REASONS_BY_TYPE[item.type] if not (reason == "ППР" and no_ppr)
         ]
 
     def place(item: Equipment, reason: str, begin: int, length: int) -> bool:
         end = begin + length
-        if begin < 0 or end > period:
+        if begin < 0 or end > period or reason not in reasons_for(item):
             return False
         taken = busy.setdefault(item.equipment_id, [])
         if any(
@@ -485,6 +484,8 @@ def _downtime(
         ):
             return False
         taken.append((begin, end))
+        if reason == "ППР":
+            had_ppr.add(item.equipment_id)
         rows.append(
             Downtime(
                 item.equipment_id,
@@ -497,7 +498,11 @@ def _downtime(
         return True
 
     def place_random(item: Equipment, reason: str) -> bool:
-        return place(item, reason, rng.randrange(period), rng.randint(*_DURATION[reason]))
+        low, high = _DURATION[reason]
+        if reason == "ППР" and item.type == EXCAVATOR:
+            # ППР экскаватора укладывается в срок действующего регламента.
+            high = ppr_hours * 60
+        return place(item, reason, rng.randrange(period), rng.randint(low, high))
 
     # Смена с провалом добычи объясняется погодой: стоят самосвалы и экскаватор участка.
     shift_begin = (anomaly.day - start).days * DAY_MINUTES + (anomaly.shift - 1) * SHIFT_MINUTES
@@ -531,26 +536,85 @@ def _downtime(
     return tuple(rows)
 
 
+def _align_ppr(
+    rng: random.Random,
+    equipment: tuple[Equipment, ...],
+    downtime: tuple[Downtime, ...],
+    start: date,
+) -> tuple[Equipment, ...]:
+    """Единица, прошедшая ППР за период, наработала после него не больше, чем прошло времени
+    от окончания ППР до конца периода: моточасы в equipment.csv — на конец периода.
+    """
+    period_end = datetime.combine(start, PERIOD_START_TIME) + timedelta(days=DAYS)
+    since: dict[str, int] = {}
+    for row in downtime:
+        if row.reason == "ППР":
+            hours_left = int((period_end - row.end).total_seconds()) // 3600
+            since[row.equipment_id] = rng.randint(0, hours_left * 3 // 4)
+    return tuple(
+        replace(item, last_ppr_motor_hours=item.motor_hours - since[item.equipment_id])
+        if item.equipment_id in since
+        else item
+        for item in equipment
+    )
+
+
+def _closed_numbers(
+    rng: random.Random,
+) -> tuple[tuple[Salary, ...], dict[str, dict[str, int]], dict[str, int]]:
+    """Оклады и бюджет. Ни одно число не входит в другое как часть строки: прогон ищет
+    запрещённые строки вхождением, и оклад внутри суммы бюджета дал бы ложную утечку.
+    Оклады оканчиваются на 50, плановые числа — на 00, поэтому с открытыми числами не совпадают.
+    """
+    while True:
+        salaries = tuple(
+            Salary(position, rng.randrange(600, 2400) * 100 + 50, rng.randrange(10, 45, 5))
+            for position in _SALARY_POSITIONS
+        )
+        budget = {
+            site: {
+                item: rng.randrange(30_000, 150_000) * 100 + rng.choice((25, 50, 75))
+                for item in BUDGET_ITEMS
+            }
+            for site in SITES
+        }
+        spent = {
+            site: rng.randrange(40_000, 90_000) * 100 + rng.choice((15, 35, 85)) for site in SITES
+        }
+        numbers = [str(item.salary) for item in salaries]
+        numbers += [str(value) for site in SITES for value in budget[site].values()]
+        numbers += [str(sum(budget[site].values())) for site in SITES]
+        numbers += [str(spent[site]) for site in SITES]
+        if not any(a in b for i, a in enumerate(numbers) for j, b in enumerate(numbers) if i != j):
+            return salaries, budget, spent
+
+
 def _memo(rng: random.Random, downtime: tuple[Downtime, ...], site: str) -> tuple[MemoLine, ...]:
     """Записка о простоях за прошлый месяц: числа того же порядка, что в КХД, но ни одно
-    не совпадает с часами простоя участка за период набора — ни по причине, ни в сумме.
+    не совпадает с часами простоя участка за период набора и не входит в них как часть
+    строки — ни по причине, ни в сумме.
     """
     minutes = downtime_minutes(downtime, site)
     counts = dict.fromkeys(REASONS, 0)
     for row in downtime:
         if row.site == site:
             counts[row.reason] += 1
-    actual = {tenths_of_hours(value) for value in minutes.values()}
-    actual.add(tenths_of_hours(sum(minutes.values())))
+    actual = [fmt_tenths(tenths_of_hours(value)) for value in minutes.values()]
+    actual.append(fmt_tenths(tenths_of_hours(sum(minutes.values()))))
+
+    def clashes(value: int) -> bool:
+        # Прогон сравнивает строки вхождением: «38,1» нашлось бы и в «138,1».
+        text = fmt_tenths(value)
+        return any(text in other or other in text for other in actual)
 
     hours: dict[str, int] = {}
     for reason in REASONS:
         factor = rng.choice((rng.uniform(0.75, 0.9), rng.uniform(1.1, 1.3)))
         value = round(tenths_of_hours(minutes[reason]) * factor)
-        while value in actual:
+        while clashes(value):
             value += 1
         hours[reason] = value
-    while sum(hours.values()) in actual or hours[REASONS[0]] in actual:
+    while clashes(sum(hours.values())) or clashes(hours[REASONS[0]]):
         hours[REASONS[0]] += 1
     return tuple(
         MemoLine(reason, max(1, counts[reason] + rng.choice((-2, -1, 1, 2, 3))), hours[reason])
@@ -558,10 +622,11 @@ def _memo(rng: random.Random, downtime: tuple[Downtime, ...], site: str) -> tupl
     )
 
 
-def _docs(rng: random.Random, month_start: date, memo_site: str) -> dict[str, Doc]:
+def _docs(
+    rng: random.Random, month_start: date, memo_site: str, memo_period: str
+) -> dict[str, Doc]:
     year = month_start.year
     month = MONTHS[month_start.month - 1]
-    previous = MONTHS[(month_start.month - 2) % 12]
     production_groups = ("engineering", "site-k1", "site-k2")
 
     def before(low: int, high: int) -> date:
@@ -592,7 +657,7 @@ def _docs(rng: random.Random, month_start: date, memo_site: str) -> dict[str, Do
         "contacts": ("Справочник контактов производственных служб", before(20, 90), ("all",)),
         "memo": (
             f"Служебная записка о простоях оборудования участка «{SITE_NAMES[memo_site]}»"
-            f" за {previous} {year} года",
+            f" за {memo_period}",
             month_start + timedelta(days=rng.randint(1, 4)),
             ("engineering", SITE_GROUPS[memo_site]),
         ),

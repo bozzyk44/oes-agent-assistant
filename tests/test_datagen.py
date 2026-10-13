@@ -17,8 +17,15 @@ import pytest
 from datagen.__main__ import main
 from datagen.check import LONG_DOC_TOKENS, check_dataset, check_traps, read_docs
 from datagen.render import INJECTION_PHRASE, render, write_dataset
-from datagen.text import min_tokens, normalize
-from datagen.world import DEFAULT_SEED, SECOND_SEED, SITES, World, build_world
+from datagen.text import fmt_tenths, min_tokens, normalize, tenths_of_hours
+from datagen.world import (
+    DEFAULT_SEED,
+    SECOND_SEED,
+    SITES,
+    World,
+    build_world,
+    downtime_minutes,
+)
 
 Dataset = tuple[Path, World]
 
@@ -259,9 +266,45 @@ def _phone_in_order(root: Path, world: World) -> None:
     _edit(root, name, person.person.name, f"{person.person.name} (тел. {person.phone})")
 
 
+def _swap_reaction_hours(root: Path, world: World) -> None:
+    first, third = world.reaction_hours[1], world.reaction_hours[3]
+    name = f"docs/{world.docs['repair'].doc_id}.md"
+    _edit(root, name, f"| {first} ч |", "| # |")
+    _edit(root, name, f"| {third} ч |", f"| {first} ч |")
+    _edit(root, name, "| # |", f"| {third} ч |")
+
+
+def _drop_weather(root: Path, world: World) -> None:
+    _drop_line(root, "downtime.csv", lambda line: not line.rstrip().endswith(",погода"))
+
+
+def _ppr_without_reset(root: Path, world: World) -> None:
+    # Единица прошла ППР за период, а наработка после него — тысяча моточасов.
+    unit = next(row.equipment_id for row in world.downtime if row.reason == "ППР")
+    path = root / "equipment.csv"
+    rows = [line.split(",") for line in path.read_text(encoding="utf-8").splitlines()]
+    for row in rows[1:]:
+        if row[0] == unit:
+            row[4] = str(int(row[5]) + 1000)
+    path.write_text("\n".join(",".join(row) for row in rows) + "\n", encoding="utf-8")
+
+
+def _memo_repeats_warehouse(root: Path, world: World) -> None:
+    # Часы записки стали теми же, что даёт расчёт по downtime.csv.
+    line = world.memo[0]
+    minutes = downtime_minutes(world.downtime, world.memo_site)[line.reason]
+    name = f"docs/{world.docs['memo'].doc_id}.md"
+    old = f"| {line.reason} | {line.count} | {fmt_tenths(line.hours_tenths)} |"
+    new = f"| {line.reason} | {line.count} | {fmt_tenths(tenths_of_hours(minutes))} |"
+    _edit(root, name, old, new)
+
+
 @pytest.mark.parametrize(
     "damage",
     [
+        _swap_reaction_hours,
+        _drop_weather,
+        _ppr_without_reset,
         _same_periodicity,
         _reset_motor_hours,
         _leak_salary,
@@ -284,8 +327,12 @@ def test_command_writes_checked_dataset_and_removes_stale_documents(tmp_path: Pa
     stale = tmp_path / "docs" / "D99.md"
     stale.parent.mkdir()
     stale.write_text("прежний запуск", encoding="utf-8")
+    # Файл вопросов генератор этой задачи не пишет и не трогает; числа закрытых документов
+    # в нём — обычное дело, это не утечка.
+    salary = build_world(SECOND_SEED).salaries[0].salary
     foreign = tmp_path / "questions.jsonl"
-    foreign.write_text("", encoding="utf-8")
+    foreign.write_text(json.dumps({"forbidden": [str(salary)]}) + "\n", encoding="utf-8")
+    (tmp_path / ".DS_Store").write_bytes(b"\xff\xfe\x00")
 
     assert main(["--seed", str(SECOND_SEED), "--out", str(tmp_path)]) == 0
     assert not stale.exists()

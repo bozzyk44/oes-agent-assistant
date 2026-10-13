@@ -27,7 +27,9 @@ from datagen.world import (
     EXCAVATOR,
     GROUPS,
     KPI_TABLES,
+    PERIOD_START_TIME,
     REASONS,
+    SHIFT_MINUTES,
     SHIFTS,
     SITE_GROUPS,
     SITES,
@@ -41,6 +43,8 @@ MIN_TRUCKS = 12
 MIN_DOWNTIME = 50
 DOCS_RANGE = (10, 15)
 LONG_DOC_TOKENS = 3000
+# Сколько единиц участка стоит по погоде в смену с низкой добычей.
+ANOMALY_STOPPED = 3
 
 _DOC_ID = re.compile(r"D\d{2,}")
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -93,8 +97,12 @@ def check_traps(root: Path, world: World) -> list[str]:
     repair = found["repair"]
     if "all" not in repair.acl:
         problems.append(f"{repair.doc_id}: порядок оформления заявок доступен не всем")
+    lines = repair.body.split("\n")
     for priority, hours in world.reaction_hours.items():
-        if f"| {priority} |" not in repair.body or f"| {hours} ч |" not in repair.body:
+        # Срок стоит в строке своего приоритета, а не где-нибудь в документе.
+        if not any(
+            line.startswith(f"| {priority} |") and line.endswith(f"| {hours} ч |") for line in lines
+        ):
             problems.append(f"{repair.doc_id}: нет приоритета {priority} со сроком реакции")
 
     handover = found["handover"]
@@ -107,15 +115,8 @@ def check_traps(root: Path, world: World) -> list[str]:
     if "all" not in safety.acl or min_tokens(safety.body) < LONG_DOC_TOKENS:
         problems.append(f"{safety.doc_id}: длинный документ короче порога или доступен не всем")
 
-    low = [
-        row
-        for row in _rows(root / "production.csv")
-        if int(row[3]) * 2 <= _median_tonnes(root, row[2])
-    ]
-    anomaly = world.anomaly
-    expected = [anomaly.day.isoformat(), str(anomaly.shift), anomaly.site, str(anomaly.tonnes)]
-    if low != [expected]:
-        problems.append("production.csv: смена с низкой добычей не одна или не та")
+    _check_anomaly(root, world, problems)
+    _check_ppr_downtime(root, world, problems)
     return problems
 
 
@@ -130,7 +131,11 @@ def read_docs(root: Path, problems: list[str]) -> list[DocFile]:
 
 def _read_doc(path: Path, problems: list[str]) -> DocFile | None:
     name = f"docs/{path.name}"
-    lines = path.read_text(encoding="utf-8").split("\n")
+    try:
+        lines = path.read_text(encoding="utf-8").split("\n")
+    except (OSError, ValueError) as error:
+        problems.append(f"{name}: не читается: {error}")
+        return None
     if lines[0] != "---" or "---" not in lines[1:]:
         problems.append(f"{name}: нет frontmatter между строками «---»")
         return None
@@ -450,11 +455,16 @@ def _check_ppr_trap(
 def _check_closed_docs(
     root: Path, world: World, docs: dict[str, DocFile], problems: list[str]
 ) -> None:
-    """Числа закрытых документов стоят в них и не встречаются больше нигде в наборе."""
+    """Числа закрытых документов стоят в них и не встречаются больше нигде в данных набора.
+
+    Смотрим только документы, пользователей и таблицы КХД — то, что может попасть в контекст
+    модели. Файл вопросов сюда не входит: в нём эти числа стоят в `forbidden` по назначению.
+    """
+    paths = [*sorted((root / "docs").glob("*.md")), root / "users.json"]
+    paths += [root / f"{table}.csv" for table in KPI_TABLES]
     others = {
         path.relative_to(root).as_posix(): normalize(path.read_text(encoding="utf-8"))
-        for path in sorted(root.rglob("*"))
-        if path.is_file()
+        for path in paths
     }
     for role, numbers in world.confidential().items():
         doc = docs[role]
@@ -499,22 +509,73 @@ def _check_memo(root: Path, world: World, memo: DocFile, problems: list[str]) ->
     minutes = dict.fromkeys(REASONS, 0)
     for row in _rows(root / "downtime.csv"):
         if row[1] == world.memo_site:
-            span = datetime.strptime(row[3], TIME_FORMAT) - datetime.strptime(row[2], TIME_FORMAT)
-            minutes[row[4]] += int(span.total_seconds()) // 60
-    actual = [tenths_of_hours(value) for value in minutes.values()]
-    actual.append(tenths_of_hours(sum(minutes.values())))
-    for value in actual:
-        if f"| {fmt_tenths(value)} |" in memo.body:
-            problems.append(f"{memo.doc_id}: часы {fmt_tenths(value)} совпадают с данными КХД")
+            minutes[row[4]] += int((_time(row[3]) - _time(row[2])).total_seconds()) // 60
+    actual = [fmt_tenths(tenths_of_hours(value)) for value in minutes.values()]
+    actual.append(fmt_tenths(tenths_of_hours(sum(minutes.values()))))
+    written = [fmt_tenths(line.hours_tenths) for line in world.memo]
+    written.append(fmt_tenths(sum(line.hours_tenths for line in world.memo)))
+    if f"| {written[-1]} |" not in memo.body:
+        problems.append(f"{memo.doc_id}: нет итога часов {written[-1]}")
+    # Прогон сравнивает вхождением, поэтому мало, чтобы числа были разными:
+    # ни одно не должно быть частью другого.
+    for mine in written:
+        for theirs in actual:
+            if mine in theirs or theirs in mine:
+                problems.append(f"{memo.doc_id}: часы {mine} пересекаются с {theirs} из КХД")
     for line in world.memo:
         if f"| {line.reason} | {line.count} | {fmt_tenths(line.hours_tenths)} |" not in memo.body:
             problems.append(f"{memo.doc_id}: нет строки по причине «{line.reason}»")
 
 
-def _median_tonnes(root: Path, site: str) -> float:
-    return statistics.median(
-        int(row[3]) for row in _rows(root / "production.csv") if row[2] == site
+def _check_anomaly(root: Path, world: World, problems: list[str]) -> None:
+    """Смена с низкой добычей одна, и на неё приходятся простои участка по погоде."""
+    rows = _rows(root / "production.csv")
+    medians = {
+        site: statistics.median(int(row[3]) for row in rows if row[2] == site) for site in SITES
+    }
+    low = [row for row in rows if int(row[3]) * 2 <= medians[row[2]]]
+    anomaly = world.anomaly
+    if low != [[anomaly.day.isoformat(), str(anomaly.shift), anomaly.site, str(anomaly.tonnes)]]:
+        problems.append("production.csv: смена с низкой добычей не одна или не та")
+
+    begin = datetime.combine(anomaly.day, PERIOD_START_TIME) + timedelta(
+        minutes=(anomaly.shift - 1) * SHIFT_MINUTES
     )
+    end = begin + timedelta(minutes=SHIFT_MINUTES)
+    stopped = {
+        row[0]
+        for row in _rows(root / "downtime.csv")
+        if row[1] == anomaly.site
+        and row[4] == "погода"
+        and _time(row[2]) < end
+        and _time(row[3]) > begin
+    }
+    if len(stopped) < ANOMALY_STOPPED:
+        problems.append("downtime.csv: смена с низкой добычей не объяснена простоями по погоде")
+
+
+def _check_ppr_downtime(root: Path, world: World, problems: list[str]) -> None:
+    """Простой «ППР» не спорит ни с моточасами, ни со сроком из действующего регламента."""
+    equipment = {row[0]: row for row in _rows(root / "equipment.csv")}
+    period_end = datetime.combine(world.start, PERIOD_START_TIME) + timedelta(days=DAYS)
+    seen: set[str] = set()
+    for row in _rows(root / "downtime.csv"):
+        if row[4] != "ППР":
+            continue
+        unit = equipment[row[0]]
+        where = f"downtime.csv: ППР {row[0]}"
+        if row[0] in seen:
+            problems.append(f"{where}: больше одного за период")
+        seen.add(row[0])
+        if int(unit[4]) - int(unit[5]) > (period_end - _time(row[3])).total_seconds() / 3600:
+            problems.append(f"{where}: наработка после ППР больше времени, прошедшего после него")
+        hours = (_time(row[3]) - _time(row[2])).total_seconds() / 3600
+        if unit[1] == EXCAVATOR and hours > world.ppr_duration_new:
+            problems.append(f"{where}: дольше срока из действующего регламента")
+
+
+def _time(text: str) -> datetime:
+    return datetime.strptime(text, TIME_FORMAT)
 
 
 def _rows(path: Path) -> list[list[str]]:
