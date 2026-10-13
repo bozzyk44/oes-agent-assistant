@@ -1,7 +1,6 @@
-# Все цели выполняются в контейнерах: на машине нужны только Docker и make.
-
-# Цели задания — data, run, test, eval — требуют только Docker и make. Цели smoke и ci —
-# сценарии оболочки: им нужны sh, а ci — ещё git и tar; REPORT=1 требует gh.
+# Цели задания — data, run, test, eval — выполняются в контейнерах и требуют только Docker
+# и make. Цели smoke и ci — сценарии оболочки на хосте вокруг тех же контейнеров: ci нужны
+# ещё git и tar, а REPORT=1 — gh.
 
 COMPOSE_PROJECT ?= oes-assistant
 COMPOSE := docker compose -p $(COMPOSE_PROJECT)
