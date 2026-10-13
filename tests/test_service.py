@@ -1,0 +1,479 @@
+"""Каркас сервиса целиком: API в процессе тестов над настоящей базой.
+
+Пользователь из заголовка, контракт ответа, захват сессии, предел времени, ошибки.
+"""
+
+from datetime import timedelta
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import Engine, create_engine, text
+
+from assistant.api.app import create_app
+from assistant.config import ConfigError
+from assistant.db.grants import grant_service
+from assistant.db.migrate import upgrade
+from assistant.db.session import transaction
+from assistant.turn.capture import capture
+from assistant.turn.runner import (
+    INTERNAL_ERROR,
+    LOOP_NOT_READY,
+    LOST_CAPTURE_ERROR,
+    MODEL_NOT_CONFIGURED,
+    TIMEOUT_ERROR,
+    StoredMessage,
+    TurnContext,
+    TurnResult,
+    UsageTotals,
+    empty_prefix_hash,
+)
+from tests.conftest import PROBE, SERVICE_PASSWORD, Database
+from tests.servicekit import (
+    MODEL_KEY,
+    RUN,
+    TOIR_TOKEN,
+    Scripted,
+    Service,
+    make_service,
+    new_session,
+    with_handler,
+)
+
+pytestmark = pytest.mark.db
+
+TURN_KEYS = {"turn_id", "outcome", "answer", "citations", "pending_action", "usage"}
+USAGE_KEYS = {
+    "model_calls",
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "max_call_input_tokens",
+    "prefix_hash",
+    "latency_ms",
+}
+
+
+@pytest.fixture
+def service(database: Database, small: Path) -> Service:
+    return make_service(database.service, database.service_url)
+
+
+def _session(database: Database, user: str, session: str) -> tuple[object, object] | None:
+    with database.owner.connect() as connection:
+        row = connection.execute(
+            text(
+                "select busy_until, capture_token from app.sessions"
+                " where user_id = :u and session_id = :s"
+            ),
+            {"u": user, "s": session},
+        ).first()
+    return None if row is None else (row[0], row[1])
+
+
+def _turns(database: Database, session: str) -> list[tuple[str, str, str]]:
+    with database.owner.connect() as connection:
+        rows = connection.execute(
+            text(
+                "select user_id, outcome, answer from app.turns where session_id = :s"
+                " order by created_at, turn_id"
+            ),
+            {"s": session},
+        ).all()
+    return [(row[0], row[1], row[2]) for row in rows]
+
+
+# --- пользователь из заголовка
+
+
+def test_no_header_is_401_not_422_and_no_turn_starts(service: Service, database: Database) -> None:
+    session = new_session()
+    reply = service.turn(None, session)
+    assert reply.status == 401
+    assert _session(database, "u-eng", session) is None
+    for path in ("/actions/a-1/confirm", "/actions/a-1/reject"):
+        assert service.client.post(path).status_code == 401
+
+
+@pytest.mark.parametrize("user", ["u-nobody", "U-ENG", " u-eng", "u-eng' or '1'='1"])
+def test_unknown_user_is_401_not_a_default_user(
+    service: Service, database: Database, user: str
+) -> None:
+    session = new_session()
+    reply = service.turn(user, session)
+    assert reply.status == 401
+    assert _turns(database, session) == []
+    assert (
+        service.client.post("/actions/a-1/confirm", headers={"X-User-ID": user}).status_code == 401
+    )
+
+
+# --- контракт ответа
+
+
+def test_turn_response_matches_contract(service: Service, database: Database) -> None:
+    session = new_session()
+    reply = service.turn("u-eng", session)
+    assert reply.status == 200
+    assert set(reply.body) == TURN_KEYS
+    usage = reply.body["usage"]
+    assert isinstance(usage, dict) and set(usage) == USAGE_KEYS
+    assert reply.body["citations"] == []
+    assert reply.body["pending_action"] is None
+    assert usage["cached_input_tokens"] is None
+    assert usage["prefix_hash"] == empty_prefix_hash()
+    # Без переменных модели сервис стартует, а ход завершается с error и понятной причиной.
+    assert reply.body["outcome"] == "error"
+    assert reply.body["answer"] == MODEL_NOT_CONFIGURED
+    assert _turns(database, session) == [("u-eng", "error", MODEL_NOT_CONFIGURED)]
+    assert _session(database, "u-eng", session) == (None, None)
+
+
+def test_configured_model_without_loop_says_so(database: Database, small: Path) -> None:
+    service = make_service(database.service, database.service_url, model=True)
+    reply = service.turn("u-eng", new_session())
+    assert (reply.body["outcome"], reply.body["answer"]) == ("error", LOOP_NOT_READY)
+    assert MODEL_KEY not in reply.text and TOIR_TOKEN not in reply.text
+
+
+def test_successful_turn_is_returned_and_stored(database: Database, small: Path) -> None:
+    def behave(context: TurnContext) -> TurnResult:
+        return TurnResult(
+            outcome="answer",
+            answer="8 часов",
+            prefix_hash="hash-1",
+            citations=({"doc_id": "A1", "chunk_id": "A1#1"},),
+            usage=UsageTotals(2, 6120, 2048, 210, 3480),
+            record={"calls": 2},
+            messages=(
+                StoredMessage("user", {"text": context.message}),
+                StoredMessage("assistant", {"text": "8 часов"}, ("A1#1",)),
+            ),
+        )
+
+    service = make_service(database.service, database.service_url, Scripted(behave))
+    session = new_session()
+    reply = service.turn("u-eng", session, "какой срок реакции?")
+    assert reply.status == 200
+    assert reply.body["outcome"] == "answer"
+    assert reply.body["citations"] == [{"doc_id": "A1", "chunk_id": "A1#1"}]
+    assert reply.body["usage"] == {
+        "model_calls": 2,
+        "input_tokens": 6120,
+        "cached_input_tokens": 2048,
+        "output_tokens": 210,
+        "max_call_input_tokens": 3480,
+        "prefix_hash": "hash-1",
+        "latency_ms": 0,
+    }
+    with transaction(database.service, "u-eng") as connection:
+        stored = connection.execute(
+            text(
+                "select question, citations, input_tokens, record from app.turns where turn_id = :t"
+            ),
+            {"t": reply.body["turn_id"]},
+        ).one()
+        roles = connection.scalars(
+            text("select role from app.messages where turn_id = :t order by seq"),
+            {"t": reply.body["turn_id"]},
+        ).all()
+    assert stored == (
+        "какой срок реакции?",
+        [{"doc_id": "A1", "chunk_id": "A1#1"}],
+        6120,
+        {"calls": 2},
+    )
+    assert roles == ["user", "assistant"]
+    with transaction(database.service, "u-k1") as connection:
+        # История принадлежит автору: под другим пользователем её не видно.
+        hidden = connection.scalar(
+            text("select count(*) from app.turns where session_id = :s"), {"s": session}
+        )
+    assert hidden == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"session_id": "s"},
+        {"message": "м"},
+        {"session_id": "", "message": "м"},
+        {"session_id": "s", "message": ""},
+        {"session_id": "s", "message": "м", "user_id": "u-eng"},
+        {"session_id": "s", "message": "м" * 201},
+        {"session_id": "s" * 201, "message": "м"},
+    ],
+)
+def test_bad_body_is_422_and_nothing_happens(
+    service: Service, database: Database, body: dict[str, str]
+) -> None:
+    response = service.client.post("/turn", json=body, headers={"X-User-ID": "u-eng"})
+    assert response.status_code == 422
+    assert _session(database, "u-eng", "s") is None
+
+
+# --- захват сессии
+
+
+def test_second_turn_in_same_session_is_409(database: Database, small: Path) -> None:
+    session = new_session()
+    seen: dict[str, int] = {}
+
+    handler = Scripted()
+    service = make_service(database.service, database.service_url, handler)
+
+    def behave(context: TurnContext) -> TurnResult:
+        if len(handler.seen) > 1:
+            return TurnResult(outcome="answer", answer="вложенный", prefix_hash="h")
+        # Пока идёт этот ход, приходит второй запрос в ту же сессию.
+        seen["same"] = service.turn("u-eng", session).status
+        # Тот же session_id у другого пользователя — другая сессия: отказа нет.
+        seen["other"] = service.turn("u-k1", session).status
+        return TurnResult(outcome="answer", answer="первый", prefix_hash="h")
+
+    handler.behave = behave
+    reply = service.turn("u-eng", session)
+    assert reply.status == 200 and reply.body["answer"] == "первый"
+    assert seen == {"same": 409, "other": 200}
+    assert sorted(_turns(database, session)) == [
+        ("u-eng", "answer", "первый"),
+        ("u-k1", "answer", "вложенный"),
+    ]
+    # Ход завершён — сессия свободна: следующий запрос проходит.
+    assert service.turn("u-eng", session).status == 200
+
+
+def test_crashed_turn_blocks_session_only_until_lease_expires(
+    service: Service, database: Database
+) -> None:
+    session = new_session()
+    lease = timedelta(seconds=service.runtime.settings.session_lease_seconds)
+    with transaction(database.service, "u-eng") as connection:
+        # Процесс упал посреди хода: отметка осталась, снять её некому.
+        assert capture(connection, "u-eng", session, uuid4(), service.clock.now, lease)
+    assert service.turn("u-eng", session).status == 409
+    service.clock.advance(lease.total_seconds() - 1)
+    assert service.turn("u-eng", session).status == 409
+    service.clock.advance(1)
+    # Срок истёк сам: сессия не заблокирована навсегда.
+    assert service.turn("u-eng", session).status == 200
+    assert _session(database, "u-eng", session) == (None, None)
+
+
+def test_error_inside_turn_is_outcome_error_and_releases_at_once(
+    database: Database, small: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def behave(context: TurnContext) -> TurnResult:
+        raise RuntimeError("секретная подробность сбоя")
+
+    service = make_service(database.service, database.service_url, Scripted(behave))
+    session = new_session()
+    reply = service.turn("u-eng", session)
+    # Не 500 и не трассировка: ответ по контракту.
+    assert reply.status == 200
+    assert set(reply.body) == TURN_KEYS
+    assert (reply.body["outcome"], reply.body["answer"]) == ("error", INTERNAL_ERROR)
+    assert "секретная подробность" not in reply.text and "Traceback" not in reply.text
+    # Подробности — в журнале сервиса.
+    assert "секретная подробность" in caplog.text
+    assert _turns(database, session) == [("u-eng", "error", INTERNAL_ERROR)]
+    # Отметка снята сразу, а не по сроку: часы не переводились.
+    assert _session(database, "u-eng", session) == (None, None)
+    assert service.turn("u-eng", session).status == 200
+
+
+def test_turn_that_outlived_its_lease_writes_nothing(database: Database, small: Path) -> None:
+    session = new_session()
+    other = uuid4()
+    handler = Scripted()
+    service = make_service(database.service, database.service_url, handler)
+
+    def behave(context: TurnContext) -> TurnResult:
+        lease = timedelta(seconds=service.runtime.settings.session_lease_seconds)
+        service.clock.now += lease + timedelta(seconds=1)
+        # Срок истёк, и сессию занял другой ход.
+        with transaction(database.service, "u-eng") as connection:
+            assert capture(connection, "u-eng", session, other, service.clock.now, lease)
+        return TurnResult(outcome="answer", answer="запоздалый ответ", prefix_hash="h")
+
+    handler.behave = behave
+    reply = service.turn("u-eng", session)
+    # Ответ, который не записан, клиенту не отдаётся.
+    assert reply.status == 200
+    assert (reply.body["outcome"], reply.body["answer"]) == ("error", LOST_CAPTURE_ERROR)
+    assert "запоздалый ответ" not in reply.text
+    assert _turns(database, session) == []
+    # Чужая отметка цела: метка захвата проверена в завершающей транзакции.
+    held = _session(database, "u-eng", session)
+    assert held is not None and held[1] == other
+
+
+def test_turn_has_an_overall_time_limit(database: Database, small: Path) -> None:
+    handler = Scripted()
+    service = make_service(database.service, database.service_url, handler)
+
+    def behave(context: TurnContext) -> TurnResult:
+        assert context.deadline.remaining() == service.runtime.settings.turn_timeout_seconds
+        service.clock.mono += service.runtime.settings.turn_timeout_seconds
+        assert context.deadline.expired()
+        return TurnResult(
+            outcome="answer", answer="поздно", prefix_hash="h", usage=UsageTotals(model_calls=3)
+        )
+
+    handler.behave = behave
+    session = new_session()
+    reply = service.turn("u-eng", session)
+    assert (reply.body["outcome"], reply.body["answer"]) == ("error", TIMEOUT_ERROR)
+    usage = reply.body["usage"]
+    # Расход уже сделанных вызовов сохраняется.
+    assert isinstance(usage, dict) and usage["model_calls"] == 3
+    assert usage["latency_ms"] == service.runtime.settings.turn_timeout_seconds * 1000
+    assert _turns(database, session) == [("u-eng", "error", TIMEOUT_ERROR)]
+    assert _session(database, "u-eng", session) == (None, None)
+
+
+def test_database_failure_before_turn_is_outcome_error(database: Database, small: Path) -> None:
+    # База недоступна уже при проверке пользователя: всё равно ответ по контракту.
+    broken = create_engine(
+        database.url("test_app", SERVICE_PASSWORD, "нет-такой-базы"),
+        connect_args={"connect_timeout": 2},
+    )
+    try:
+        service = make_service(broken, database.service_url)
+        reply = service.turn("u-eng", new_session())
+        assert reply.status == 200
+        assert set(reply.body) == TURN_KEYS
+        assert (reply.body["outcome"], reply.body["answer"]) == ("error", INTERNAL_ERROR)
+        assert SERVICE_PASSWORD not in reply.text and "Traceback" not in reply.text
+        assert service.client.get("/healthz").status_code == 503
+    finally:
+        broken.dispose()
+
+
+def test_unhandled_error_elsewhere_is_500_without_traceback(database: Database) -> None:
+    broken = create_engine(
+        database.url("test_app", SERVICE_PASSWORD, "нет-такой-базы"),
+        connect_args={"connect_timeout": 2},
+    )
+    try:
+        service = make_service(broken, database.service_url, raise_server_exceptions=False)
+        response = service.client.post("/actions/a-1/confirm", headers={"X-User-ID": "u-eng"})
+        assert response.status_code == 500
+        assert response.json() == {"detail": "внутренняя ошибка сервиса"}
+        assert SERVICE_PASSWORD not in response.text and "Traceback" not in response.text
+    finally:
+        broken.dispose()
+
+
+# --- привязка к пользователю
+
+
+def test_every_transaction_is_bound_to_the_user(database: Database, small: Path) -> None:
+    with transaction(database.service, "u-k1") as connection:
+        assert connection.scalar(text("select current_setting('app.user_id', true)")) == "u-k1"
+        assert connection.scalar(text("select count(*) from dwh.production")) == 2
+    with database.service.connect() as connection:
+        # Вне такой транзакции привязки нет, и строк не видно.
+        assert connection.scalar(text("select count(*) from dwh.production")) == 0
+
+
+# --- действия: каркас маршрутов
+
+
+def test_action_routes_check_user_existence_and_author(
+    service: Service, database: Database
+) -> None:
+    session = new_session()
+    turn_id = service.turn("u-eng", session).body["turn_id"]
+    action_id = f"a-{RUN}-skeleton"
+    with transaction(database.service, "u-eng") as connection:
+        connection.execute(
+            text(
+                "insert into app.actions (action_id, user_id, session_id, turn_id, tool, params)"
+                " values (:a, 'u-eng', :s, :t, 'create_repair_request', '{}')"
+            ),
+            {"a": action_id, "s": session, "t": turn_id},
+        )
+    for verb in ("confirm", "reject"):
+        missing = service.client.post(f"/actions/нет/{verb}", headers={"X-User-ID": "u-eng"})
+        foreign = service.client.post(f"/actions/{action_id}/{verb}", headers={"X-User-ID": "u-k1"})
+        own = service.client.post(f"/actions/{action_id}/{verb}", headers={"X-User-ID": "u-eng"})
+        assert (missing.status_code, foreign.status_code) == (404, 403)
+        # Сам переход появится вместе с записью; каркас честно отвечает, что его нет.
+        assert own.status_code == 501
+    with database.owner.connect() as connection:
+        status = connection.scalar(
+            text("select status from app.actions where action_id = :a"), {"a": action_id}
+        )
+    assert status == "proposed"
+
+
+# --- готовность и старт процесса
+
+
+def test_readiness_follows_schema_and_dataset(database: Database, empty: Engine) -> None:
+    engine = create_engine(database.url("test_app", SERVICE_PASSWORD, PROBE))
+    try:
+        client = make_service(engine, database.service_url).client
+        # Схемы нет вовсе.
+        assert client.get("/healthz").status_code == 503
+        with empty.begin() as connection:
+            upgrade(connection)
+            grant_service(connection, database.accounts.service.role)
+        # Схема есть, набор не загружен: сервису нечем отвечать.
+        assert client.get("/healthz").json() == {"status": "набор не загружен"}
+        with empty.begin() as connection:
+            connection.execute(text("insert into app.dataset_version (content_hash) values ('x')"))
+        assert client.get("/healthz").json() == {"status": "ok"}
+        with empty.begin() as connection:
+            connection.execute(text("update alembic_version set version_num = '9999_future'"))
+        response = client.get("/healthz")
+        assert (response.status_code, response.json()) == (503, {"status": "схема не той версии"})
+    finally:
+        engine.dispose()
+
+
+def test_process_starts_from_environment_without_model(
+    database: Database, small: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("MODEL_BASE_URL", "MODEL_API_KEY", "MODEL_NAME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DATABASE_URL", database.service_url)
+    monkeypatch.setenv("TOIR_TOKEN", TOIR_TOKEN)
+    client = TestClient(create_app())
+    assert client.get("/healthz").json() == {"status": "ok"}
+    # Схема API наружу не публикуется: контракт задан заданием, а не автодокументацией.
+    assert client.get("/docs").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+    reply = client.post(
+        "/turn",
+        json={"session_id": new_session(), "message": "вопрос"},
+        headers={"X-User-ID": "u-eng"},
+    )
+    assert reply.status_code == 200
+    assert reply.json()["outcome"] == "error"
+    assert reply.json()["turn_id"].startswith("t-")
+    assert TOIR_TOKEN not in reply.text
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("DATABASE_URL", ""), ("TOIR_TOKEN", ""), ("TOIR_TOKEN", "__GENERATE__")],
+)
+def test_process_does_not_start_with_placeholder_or_missing_secret(
+    database: Database, monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", database.service_url)
+    monkeypatch.setenv("TOIR_TOKEN", TOIR_TOKEN)
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ConfigError, match=name):
+        create_app()
+
+
+def test_handler_can_be_replaced_without_touching_the_frame(service: Service) -> None:
+    # Каркас — рамка: цикл с моделью встраивается подменой обработчика.
+    swapped = with_handler(service, Scripted())
+    reply = swapped.turn("u-eng", new_session())
+    assert (reply.body["outcome"], reply.body["answer"]) == ("answer", "ответ")

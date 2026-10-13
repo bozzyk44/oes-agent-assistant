@@ -1,0 +1,99 @@
+"""Настройки сервиса из переменных окружения.
+
+Секрет ТОиР — в отдельном объекте: его получает только `actions/`, а цикл хода, инструменты
+и клиент модели работают с `Settings`, в которых токена нет. Попасть во вход модели ему
+неоткуда.
+"""
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+
+# Метка из .env.example: значение, которое `make run` заменяет случайным секретом.
+PLACEHOLDER = "__GENERATE__"
+
+
+class ConfigError(Exception):
+    """Сервис не может стартовать; в тексте только имена переменных, значений нет."""
+
+
+@dataclass(frozen=True)
+class ModelSettings:
+    base_url: str
+    # Ключ не показывается ни в repr настроек, ни в журнале.
+    api_key: str = field(repr=False)
+    name: str
+
+    @property
+    def configured(self) -> bool:
+        """Модель задана тремя переменными; без любой из них ход завершается с `error`."""
+        return bool(self.base_url and self.api_key and self.name)
+
+
+@dataclass(frozen=True)
+class Settings:
+    database_url: str = field(repr=False)
+    data_dir: str
+    model: ModelSettings
+    toir_url: str
+    # Сообщение пользователя длиннее — 422: оно ограничивает вход первого вызова модели.
+    max_message_chars: int
+    # Общий предел времени хода и срок отметки занятости сессии, секунды. Предел короче
+    # срока: ход, уложившийся в предел, всегда успевает записать результат под своей меткой.
+    turn_timeout_seconds: float
+    session_lease_seconds: float
+
+
+@dataclass(frozen=True)
+class ToirSecret:
+    token: str = field(repr=False)
+
+
+def _number(env: Mapping[str, str], name: str, default: float) -> float:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigError(f"{name}: ожидалось число") from None
+    if value <= 0:
+        raise ConfigError(f"{name}: ожидалось положительное число")
+    return value
+
+
+def _required(env: Mapping[str, str], name: str) -> str:
+    value = env.get(name, "")
+    if not value:
+        raise ConfigError(f"не задана переменная окружения {name}")
+    if PLACEHOLDER in value:
+        raise ConfigError(
+            f"в переменной {name} осталась метка из .env.example."
+            " Создайте .env командой `make run` или впишите значение вручную"
+        )
+    return value
+
+
+def load_settings(env: Mapping[str, str]) -> Settings:
+    settings = Settings(
+        database_url=_required(env, "DATABASE_URL"),
+        data_dir=env.get("DATA_DIR") or "data/",
+        model=ModelSettings(
+            base_url=env.get("MODEL_BASE_URL", "").strip(),
+            api_key=env.get("MODEL_API_KEY", "").strip(),
+            name=env.get("MODEL_NAME", "").strip(),
+        ),
+        toir_url=env.get("TOIR_URL") or "http://toir:8001",
+        max_message_chars=int(_number(env, "MAX_MESSAGE_CHARS", 4000)),
+        turn_timeout_seconds=_number(env, "TURN_TIMEOUT_SECONDS", 90),
+        session_lease_seconds=_number(env, "SESSION_LEASE_SECONDS", 120),
+    )
+    if settings.turn_timeout_seconds >= settings.session_lease_seconds:
+        raise ConfigError(
+            "TURN_TIMEOUT_SECONDS должен быть меньше SESSION_LEASE_SECONDS: иначе ход может"
+            " пережить свою отметку занятости сессии"
+        )
+    return settings
+
+
+def load_toir_secret(env: Mapping[str, str]) -> ToirSecret:
+    return ToirSecret(token=_required(env, "TOIR_TOKEN"))

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from psycopg import sql
 from sqlalchemy import Engine, create_engine, text
 
 from assistant.db.grants import grant_service
@@ -102,3 +103,23 @@ def small(database: Database, tmp_path: Path) -> Path:
     root = write_small_dataset(tmp_path / "small")
     database.load(root)
     return root
+
+
+# Пустая база на время теста: без миграций и без набора.
+PROBE = "migrations_probe"
+
+
+@pytest.fixture
+def empty(database: Database) -> Iterator[Engine]:
+    """Пустая база владельца: в ней нет ни одной миграции."""
+    name = sql.Identifier(PROBE)
+    with connect_admin(database.host, database.port, database.admin_password) as admin:
+        admin.execute(sql.SQL("drop database if exists {} with (force)").format(name))
+        admin.execute(sql.SQL("create database {} owner test_owner").format(name))
+        admin.execute(sql.SQL("revoke all on database {} from public").format(name))
+        admin.execute(sql.SQL("grant connect on database {} to test_app").format(name))
+    engine = create_engine(database.url("test_owner", OWNER_PASSWORD, PROBE))
+    yield engine
+    engine.dispose()
+    with connect_admin(database.host, database.port, database.admin_password) as admin:
+        admin.execute(sql.SQL("drop database if exists {} with (force)").format(name))

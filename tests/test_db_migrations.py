@@ -5,11 +5,9 @@
 идёт в своей базе, созданной на время теста: общую базу тестов откат бы опустошил.
 """
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from psycopg import sql
 from sqlalchemy import Connection, Engine, create_engine, inspect, text
 
 from assistant.db import models
@@ -26,29 +24,11 @@ from assistant.db.migrate import (
     upgrade_to,
 )
 from assistant.ingest.__main__ import load, main, migrate
-from assistant.ingest.startup import StartupError, connect_admin
-from tests.conftest import OWNER_PASSWORD, SERVICE_PASSWORD, Database
+from assistant.ingest.startup import StartupError
+from tests.conftest import OWNER_PASSWORD, PROBE, SERVICE_PASSWORD, Database
 from tests.smallset import write_small_dataset
 
 pytestmark = [pytest.mark.db, pytest.mark.migrations]
-
-PROBE = "migrations_probe"
-
-
-@pytest.fixture
-def empty(database: Database) -> Iterator[Engine]:
-    """Пустая база владельца: в ней нет ни одной миграции."""
-    name = sql.Identifier(PROBE)
-    with connect_admin(database.host, database.port, database.admin_password) as admin:
-        admin.execute(sql.SQL("drop database if exists {} with (force)").format(name))
-        admin.execute(sql.SQL("create database {} owner test_owner").format(name))
-        admin.execute(sql.SQL("revoke all on database {} from public").format(name))
-        admin.execute(sql.SQL("grant connect on database {} to test_app").format(name))
-    engine = create_engine(database.url("test_owner", OWNER_PASSWORD, PROBE))
-    yield engine
-    engine.dispose()
-    with connect_admin(database.host, database.port, database.admin_password) as admin:
-        admin.execute(sql.SQL("drop database if exists {} with (force)").format(name))
 
 
 def _schemas(engine: Engine) -> set[str]:
