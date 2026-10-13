@@ -28,6 +28,10 @@ services:
       RUFF_NO_CACHE: "true"
       # Тест проверяет, что выхода наружу действительно нет.
       EXPECT_NO_NETWORK: "1"
+      # Набор из репозитория: тест сверяет его с выходом генератора.
+      DATASET_DIR: /data
+    volumes:
+      - ./data:/data:ro
     command:
       - sh
       - -ec
