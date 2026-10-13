@@ -18,8 +18,9 @@ step() { printf '\n== %s\n' "$1"; }
 fail() { printf 'smoke: ПРОВАЛ — %s\n' "$1" >&2; exit 1; }
 
 # Свой каталог набора с файлом-меткой: проверяется, что в контейнер попадает именно
-# каталог с хоста и что подмена DATA_DIR действует. Каталог лежит внутри проекта:
-# не всякий Docker видит системный каталог временных файлов.
+# каталог с хоста и что подмена DATA_DIR действует. Сам набор в него пишет генератор
+# с другим зерном, чем у data/: сервис поднимается не на наборе из репозитория.
+# Каталог лежит внутри проекта: не всякий Docker видит системный каталог временных файлов.
 marker="smoke-marker-$$"
 smoke_data="$PWD/.smoke/data"
 rm -rf "$PWD/.smoke"
@@ -78,6 +79,12 @@ $COMPOSE --profile tools run --rm --build -T --user "$(id -u):$(id -g)" \
 diff -r -x .DS_Store "$PWD/.smoke/generated" "$PWD/data" \
     || fail "data/ отличается от выхода генератора. Если в data/ намеренно лежит другой набор, это ожидаемо; если набор репозитория — make data перезапишет его выходом генератора"
 
+step "набор сценария — от генератора с другим зерном"
+$COMPOSE --profile tools run --rm -T --user "$(id -u):$(id -g)" \
+    --volume "$smoke_data:/out" datagen python -m datagen --seed 7 --out /out >/dev/null \
+    || fail "генератор не записал набор сценария"
+[ -f "$smoke_data/$marker" ] || fail "генератор стёр посторонний файл в каталоге набора"
+
 step "чистый старт"
 $COMPOSE down --volumes --remove-orphans >/dev/null 2>&1 || true
 $COMPOSE up --build --detach --wait
@@ -94,6 +101,37 @@ for service in assistant toir; do
     [ "$(printf '%s\n%s\n' "$loader_done" "$started" | sort | head -n 1)" = "$loader_done" ] \
         || fail "$service стартовал раньше, чем завершился загрузчик"
 done
+
+step "загрузчик создал роли и схему и загрузил набор сценария"
+case "$($COMPOSE logs --no-log-prefix loader 2>&1)" in
+    *"набор загружен"*) ;;
+    *) fail "загрузчик не сообщил о загрузке набора" ;;
+esac
+# Под ролью сервиса: полномочия читаются, строки КХД без привязки к пользователю не видны,
+# в базу заглушки роль не входит. Адрес берётся из окружения контейнера и не печатается.
+check_database() {
+    $COMPOSE exec -T assistant python -c "
+import os, sys
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
+url = os.environ['DATABASE_URL']
+engine = create_engine(url)
+with engine.connect() as c:
+    users = c.scalar(text('select count(*) from app.users'))
+    hidden = c.scalar(text('select count(*) from dwh.production'))
+    owned = c.scalar(text(\"select count(*) from pg_tables where tableowner = current_user\"))
+if not users:
+    sys.exit('пользователи не загружены')
+if hidden or owned:
+    sys.exit('роль сервиса видит строки КХД без привязки или владеет таблицами')
+try:
+    create_engine(url.rsplit('/', 1)[0] + '/toir').connect()
+except OperationalError:
+    sys.exit(0)
+sys.exit('роль сервиса вошла в базу заглушки')
+"
+}
+check_database || fail "база после загрузчика не в том состоянии"
 
 step "имя модели из окружения оболочки дошло до сервиса"
 [ "$($COMPOSE exec -T assistant printenv MODEL_NAME)" = "$MODEL_NAME" ] \
@@ -166,5 +204,11 @@ step "повторный старт поверх существующего то
 $COMPOSE down --remove-orphans >/dev/null 2>&1
 $COMPOSE up --detach --wait
 case "$(fetch http://toir:8001/healthz)" in *'"ok"'*) ;; *) fail "после повторного старта заглушка недоступна" ;; esac
+# Тот же набор поверх того же тома: загрузчик ничего не меняет, сессии и действия целы.
+case "$($COMPOSE logs --no-log-prefix loader 2>&1)" in
+    *"набор не изменился"*) ;;
+    *) fail "повторный запуск загрузчика перезагрузил тот же набор" ;;
+esac
+check_database || fail "база после повторного старта не в том состоянии"
 
 printf '\nsmoke: всё прошло\n'

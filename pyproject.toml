@@ -4,8 +4,11 @@ version = "0.1.0"
 description = "Ассистент сотрудника с правами доступа: тестовое задание"
 requires-python = ">=3.14,<3.15"
 dependencies = [
+    "alembic>=1.14",
     "fastapi>=0.115",
     "psycopg[binary]>=3.2",
+    "pyyaml>=6.0",
+    "sqlalchemy>=2.0",
     "uvicorn>=0.34",
 ]
 
@@ -15,6 +18,7 @@ dev = [
     "mypy>=1.15",
     "pytest>=8.3",
     "ruff>=0.9",
+    "types-pyyaml>=6.0",
 ]
 
 [tool.uv]
@@ -31,7 +35,8 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PTH", "RUF", "S", "T20"]
 ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+# S105: пароли ролей в тестах — метки, а не секреты.
+"tests/**" = ["S101", "S105"]
 # Точки входа командной строки печатают в stdout намеренно.
 "src/*/__main__.py" = ["T201"]
 

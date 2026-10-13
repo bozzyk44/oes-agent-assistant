@@ -1,8 +1,7 @@
 """Проверки загрузчика перед работой с базой.
 
-Каркас: загрузчик убеждается, что окружение заполнено настоящими значениями
-и что сервер PostgreSQL принимает вход администратора по сети. Роли, базы,
-миграции и загрузка набора появляются в задаче про схему базы.
+Загрузчик убеждается, что окружение заполнено настоящими значениями и что сервер
+PostgreSQL принимает вход администратора по сети.
 """
 
 from collections.abc import Mapping
@@ -38,18 +37,18 @@ def check_environment(env: Mapping[str, str]) -> None:
         )
 
 
-def check_server(host: str, port: int, password: str) -> str:
-    """Входит администратором по сети и возвращает версию сервера."""
+def connect_admin(host: str, port: int, password: str) -> psycopg.Connection:
+    """Входит администратором по сети в режиме автофиксации: базы создаются вне транзакций."""
     try:
-        with psycopg.connect(
+        return psycopg.connect(
             host=host,
             port=port,
             user="postgres",
             password=password,
             dbname="postgres",
             connect_timeout=10,
-        ) as conn:
-            row = conn.execute("select current_setting('server_version')").fetchone()
+            autocommit=True,
+        )
     except psycopg.OperationalError as exc:
         # Текст ошибки драйвера содержит адрес и имя роли, но не пароль.
         message = f"PostgreSQL недоступен: {exc}".strip()
@@ -60,6 +59,12 @@ def check_server(host: str, port: int, password: str) -> str:
                 "или удалите том командой `make reset`"
             )
         raise StartupError(message) from exc
+
+
+def check_server(host: str, port: int, password: str) -> str:
+    """Входит администратором по сети и возвращает версию сервера."""
+    with connect_admin(host, port, password) as conn:
+        row = conn.execute("select current_setting('server_version')").fetchone()
     if row is None:
         raise StartupError("PostgreSQL не вернул версию сервера")
     return str(row[0])
