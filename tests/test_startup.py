@@ -7,7 +7,7 @@ from assistant.ingest.startup import (
     REQUIRED,
     StartupError,
     check_environment,
-    check_server,
+    connect_admin,
 )
 
 FILLED = {name: f"value-of-{name.lower()}" for name in REQUIRED}
@@ -41,19 +41,22 @@ def test_placeholder_is_rejected_and_value_not_shown(name: str) -> None:
 
 @pytest.mark.db
 def test_server_answers_over_network() -> None:
-    version = check_server(
+    with connect_admin(
         host=os.environ["POSTGRES_HOST"],
         port=int(os.environ.get("POSTGRES_PORT", "5432")),
         password=os.environ["POSTGRES_PASSWORD"],
-    )
-    assert version.split(".")[0].isdigit()
+    ) as admin:
+        row = admin.execute("select current_setting('server_version'), current_user").fetchone()
+    assert row is not None
+    assert row[0].split(".")[0].isdigit()
+    assert row[1] == "postgres"
 
 
 @pytest.mark.db
 def test_wrong_password_fails_without_echoing_it() -> None:
     wrong = "wrong-password-marker-5f1c"
     with pytest.raises(StartupError) as caught:
-        check_server(
+        connect_admin(
             host=os.environ["POSTGRES_HOST"],
             port=int(os.environ.get("POSTGRES_PORT", "5432")),
             password=wrong,
