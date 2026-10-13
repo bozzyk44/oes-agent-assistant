@@ -1,0 +1,22 @@
+#cloud-config
+hostname: ${hostname}
+
+users:
+  - name: ${login}
+    groups: [sudo, docker]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - make
+  - git
+
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker ${login}

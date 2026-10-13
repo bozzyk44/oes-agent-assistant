@@ -1,0 +1,10 @@
+# Провайдера Cloud.ru нет в общем реестре Terraform: он ставится с зеркала провайдера.
+provider_installation {
+  network_mirror {
+    url     = "https://evo-tf-provider-generic.ar.cloud.ru/"
+    include = ["cloudru/*"]
+  }
+  direct {
+    exclude = ["cloudru/*"]
+  }
+}

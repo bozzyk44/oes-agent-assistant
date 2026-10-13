@@ -8,3 +8,10 @@ __pycache__/
 *.sqlite3
 *.db
 .DS_Store
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
