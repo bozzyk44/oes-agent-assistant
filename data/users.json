@@ -1,0 +1,42 @@
+[
+  {
+    "user_id": "u-makarov",
+    "name": "Макаров Павел Григорьевич",
+    "position": "Начальник участка «Карьер-1»",
+    "groups": ["site-k1"],
+    "kpi": {"production": ["K1"], "downtime": ["K1"], "equipment": ["K1"]},
+    "repair_requests": ["K1"]
+  },
+  {
+    "user_id": "u-pavlov",
+    "name": "Павлов Николай Васильевич",
+    "position": "Начальник участка «Карьер-2»",
+    "groups": ["site-k2"],
+    "kpi": {"production": ["K2"], "downtime": ["K2"], "equipment": ["K2"]},
+    "repair_requests": ["K2"]
+  },
+  {
+    "user_id": "u-semenova",
+    "name": "Семёнова Ирина Олеговна",
+    "position": "Специалист по персоналу",
+    "groups": ["hr"],
+    "kpi": {},
+    "repair_requests": []
+  },
+  {
+    "user_id": "u-andreeva",
+    "name": "Андреева Ксения Игоревна",
+    "position": "Экономист планово-экономического отдела",
+    "groups": ["finance"],
+    "kpi": {"production": ["K1", "K2"]},
+    "repair_requests": []
+  },
+  {
+    "user_id": "u-orlova",
+    "name": "Орлова Юлия Романовна",
+    "position": "Главный инженер",
+    "groups": ["engineering"],
+    "kpi": {"production": ["K1", "K2"], "downtime": ["K1", "K2"], "equipment": ["K1", "K2"]},
+    "repair_requests": ["K1", "K2"]
+  }
+]
