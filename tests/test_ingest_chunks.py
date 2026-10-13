@@ -54,6 +54,28 @@ def test_table_on_part_boundary_keeps_its_header() -> None:
     assert found == rows
 
 
+def test_table_right_under_caption_keeps_its_header() -> None:
+    head = "| Причина | Часов |  \n| --- | ---: |"
+    rows = [f"| причина номер {number} | {number},5 |" for number in range(1, 31)]
+    body = "## Таблица\n\nПодпись без пустой строки:\n" + head + "\n" + "\n".join(rows)
+    pieces = split_document("D1", body, limit=300)
+    table_parts = [p for p in pieces if "| причина номер" in p.body]
+    assert len(table_parts) > 1
+    assert all(head in p.body for p in table_parts)
+    assert "Подпись без пустой строки:" in pieces[0].body
+
+
+def test_table_with_rows_longer_than_limit_still_fits() -> None:
+    # Потолок важнее повтора шапки: строка, которая не помещается, режется как текст.
+    head = "| Показатель | Описание |\n|---|---|"
+    rows = [f"| показатель {number} | " + "длинное описание " * 30 + "|" for number in range(1, 6)]
+    pieces = split_document("D1", "## Таблица\n\n" + head + "\n" + "\n".join(rows), limit=300)
+    assert len(pieces) > 5
+    assert all(len(p.heading) + len(p.body) <= 300 for p in pieces)
+    text = " ".join(p.body for p in pieces)
+    assert all(f"показатель {number} " in text for number in range(1, 6))
+
+
 def test_single_long_line_is_cut_at_spaces() -> None:
     line = " ".join(f"слово{number}" for number in range(200))
     pieces = split_document("D1", f"## Раздел\n\n{line}", limit=200)
@@ -64,8 +86,11 @@ def test_single_long_line_is_cut_at_spaces() -> None:
 
 def test_exact_terms_are_identifiers_and_numbers() -> None:
     terms = exact_terms("Экскаватор EX-03 модели ЭКГ-10, ёмкость 12,5 м3, план 137 400, пункт 4.2")
-    assert terms == sorted({"ex-03", "экг-10", "12", "5", "м3", "137", "400", "4", "2"})
+    assert terms == sorted({"ex-03", "экг-10", "12.5", "м3", "137", "400", "4.2"})
     assert exact_terms("Слова без цифр и дефис-слова") == []
+    # Косая черта идентификаторы не склеивает; запятая и точка в числе — одно и то же.
+    assert exact_terms("EX-02/EX-03, ЭКГ-10/ЭКГ-12") == ["ex-02", "ex-03", "экг-10", "экг-12"]
+    assert exact_terms("38,1 и 38.1") == ["38.1"]
 
 
 def test_generated_documents_fit_the_limit_and_keep_their_text(

@@ -176,6 +176,9 @@ def test_equipment_site_is_known_without_table_grant(database: Database, small: 
         ("u-k1", "диспетчер отвечает по рации", False),
         ("u-k1", "", False),
         ("u-k1", "совершенно посторонний запрос", False),
+        # Тому, кого приложение не знает, функция не отвечает — как и политики.
+        ("u-nobody", "какой оклад у горного мастера", False),
+        ("", "какой оклад у горного мастера", False),
     ],
 )
 def test_best_match_is_closed(

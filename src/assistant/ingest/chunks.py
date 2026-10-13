@@ -18,7 +18,9 @@ CHUNK_TOKENS = TOOL_RESULT_TOKENS // 4
 CHARS_PER_TOKEN = 3
 CHUNK_CHARS = CHUNK_TOKENS * CHARS_PER_TOKEN
 
-_TERM = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+(?:[-/][0-9A-Za-zА-Яа-яЁё]+)*")
+# Десятичное число целиком — 12,5 — либо слово с дефисами: EX-03, ЭКГ-10. Косая черта
+# слова не склеивает: «EX-02/EX-03» — два идентификатора.
+_TERM = re.compile(r"\d+(?:[.,]\d+)+(?![-\w])|[0-9A-Za-zА-Яа-яЁё]+(?:-[0-9A-Za-zА-Яа-яЁё]+)*")
 _TABLE_RULE = re.compile(r"\|[\s:|-]+\|")
 
 
@@ -69,10 +71,11 @@ def split_document(doc_id: str, body: str, limit: int = CHUNK_CHARS) -> list[Pie
 def exact_terms(text: str) -> list[str]:
     """Идентификаторы и числа для точного поиска: слова с цифрой, без стемминга.
 
-    Регистр и «ё» приводятся так же, как в полнотекстовом индексе.
+    Регистр и «ё» приводятся так же, как в полнотекстовом индексе; запятая в десятичном
+    числе — к точке.
     """
     found = {
-        match.group().lower().replace("ё", "е")
+        match.group().lower().replace("ё", "е").replace(",", ".")
         for match in _TERM.finditer(text)
         if any(char.isdigit() for char in match.group())
     }
@@ -86,28 +89,49 @@ def _split_section(text: str, limit: int) -> list[str]:
     for block in re.split(r"\n\s*\n", text):
         if len(block) <= limit:
             units.append(block)
-        elif _is_table(block):
-            units.extend(_split_table(block, limit))
         else:
-            units.extend(_split_lines(block, limit))
+            units.extend(_split_block(block.split("\n"), limit))
     return _pack(units, limit, "\n\n")
 
 
-def _is_table(block: str) -> bool:
-    rows = block.split("\n")
-    return len(rows) >= 2 and rows[0].startswith("|") and bool(_TABLE_RULE.fullmatch(rows[1]))
+def _split_block(rows: list[str], limit: int) -> list[str]:
+    """Блок длиннее потолка. Таблица в нём — в том числе сразу под строкой подписи —
+    делится по строкам с повтором шапки, остальное — по строкам текста.
+    """
+    start = next(
+        (
+            index
+            for index in range(len(rows) - 1)
+            if rows[index].lstrip().startswith("|")
+            and _TABLE_RULE.fullmatch(rows[index + 1].strip())
+        ),
+        None,
+    )
+    if start is None:
+        return _split_lines(rows, limit)
+    end = start + 2
+    while end < len(rows) and rows[end].lstrip().startswith("|"):
+        end += 1
+    return [
+        *(_split_lines(rows[:start], limit) if start else []),
+        *_split_table(rows[start:end], limit),
+        *(_split_lines(rows[end:], limit) if end < len(rows) else []),
+    ]
 
 
-def _split_table(block: str, limit: int) -> list[str]:
-    rows = block.split("\n")
+def _split_table(rows: list[str], limit: int) -> list[str]:
     head = "\n".join(rows[:2])
-    room = max(limit - len(head) - 1, 1)
+    room = limit - len(head) - 1
+    # Шапка занимает больше половины потолка или строка не помещается рядом с ней:
+    # повторять шапку нечем, и таблица делится как обычный текст — потолок важнее.
+    if room < limit // 2 or any(len(row) > room for row in rows[2:]):
+        return _split_lines(rows, limit)
     return [f"{head}\n{part}" for part in _pack(rows[2:], room, "\n")]
 
 
-def _split_lines(block: str, limit: int) -> list[str]:
+def _split_lines(lines: list[str], limit: int) -> list[str]:
     units: list[str] = []
-    for line in block.split("\n"):
+    for line in lines:
         # Строка длиннее потолка режется по пробелам: резать её больше не по чему.
         while len(line) > limit:
             cut = line.rfind(" ", 0, limit + 1)

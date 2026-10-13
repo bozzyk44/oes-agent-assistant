@@ -32,6 +32,11 @@ _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 _INT = re.compile(r"-?\d+")
 _FRONTMATTER_REQUIRED = ("id", "title", "date", "status", "acl")
+# Как YAML записывает отсутствие значения; типы не угадываются, поэтому сравнение по тексту.
+_YAML_NULLS = ("null", "Null", "NULL", "~")
+# Границы целых колонок базы: значение вне их названо с файлом и строкой, а не ошибкой базы.
+_INT_MAX = 2**31 - 1
+_SMALLINT_MAX = 2**15 - 1
 
 
 class DatasetError(Exception):
@@ -104,7 +109,12 @@ def read_dataset(root: Path, loader_version: int) -> Dataset:
         ),
         users=_users(texts["users.json"]),
         production=tuple(
-            (_date_cell(where, row[0]), _int_cell(where, row[1]), row[2], _int_cell(where, row[3]))
+            (
+                _date_cell(where, row[0]),
+                _int_cell(where, row[1], _SMALLINT_MAX),
+                row[2],
+                _int_cell(where, row[3]),
+            )
             for where, row in _rows("production.csv", texts["production.csv"], PRODUCTION_COLUMNS)
         ),
         downtime=tuple(
@@ -134,9 +144,11 @@ def _rows(name: str, text: str, columns: tuple[str, ...]) -> list[tuple[str, lis
     return rows
 
 
-def _int_cell(where: str, value: str) -> int:
+def _int_cell(where: str, value: str, limit: int = _INT_MAX) -> int:
     if not _INT.fullmatch(value):
         raise DatasetError(f"{where}: ожидалось целое число")
+    if abs(int(value)) > limit:
+        raise DatasetError(f"{where}: число больше допустимого {limit}")
     return int(value)
 
 
@@ -167,44 +179,49 @@ def _document(name: str, stem: str, text: str) -> DocumentFile:
     except StopIteration:
         raise DatasetError(f"{name}: frontmatter не закрыт строкой «---»") from None
     try:
-        meta = yaml.safe_load("\n".join(lines[1:end]))
-    except yaml.YAMLError as exc:
+        # Значения читаются строками, без догадок YAML о типах: иначе идентификатор 0012
+        # стал бы числом 10, группа no — ложью, а дата 2026-02-30 уронила бы разбор.
+        # BaseLoader строит только строки, списки и словари — произвольных объектов нет.
+        meta = yaml.load("\n".join(lines[1:end]), Loader=yaml.BaseLoader)  # noqa: S506
+    except (yaml.YAMLError, ValueError) as exc:
         mark = getattr(exc, "problem_mark", None)
         line = f":{mark.line + 2}" if mark is not None else ""
         raise DatasetError(f"{name}{line}: frontmatter не разобран как YAML") from exc
     if not isinstance(meta, dict):
         raise DatasetError(f"{name}: frontmatter должен быть набором «поле: значение»")
     for field in _FRONTMATTER_REQUIRED:
-        if meta.get(field) in (None, "", []):
+        if meta.get(field) in (None, "", [], *_YAML_NULLS):
             raise DatasetError(f"{name}: нет обязательного поля «{field}»")
-    if str(meta["id"]) != stem:
+    for field in ("id", "title", "date", "status"):
+        if not isinstance(meta[field], str):
+            raise DatasetError(f"{name}: поле {field} должно быть строкой")
+    if meta["id"] != stem:
         raise DatasetError(f"{name}: поле id не совпадает с именем файла")
 
-    # YAML сам читает 2026-03-02 как дату; строка в кавычках проверяется по формату.
-    doc_date = meta["date"]
-    if isinstance(doc_date, datetime) or not isinstance(doc_date, date):
-        doc_date = _date_cell(f"{name}: поле date", str(doc_date))
-
     acl = meta["acl"]
-    if isinstance(acl, (str, int)):
+    if isinstance(acl, str):
         acl = [acl]
-    if not isinstance(acl, list) or any(isinstance(item, (dict, list)) for item in acl):
+    if not isinstance(acl, list) or not all(isinstance(item, str) for item in acl):
         raise DatasetError(f"{name}: поле acl должно быть списком групп")
 
     return DocumentFile(
         doc_id=stem,
-        title=str(meta["title"]),
-        date=doc_date,
-        status=str(meta["status"]),
-        acl=tuple(dict.fromkeys(str(item) for item in acl)),
-        supersedes=_optional(meta.get("supersedes")),
-        superseded_by=_optional(meta.get("superseded_by")),
+        title=meta["title"],
+        date=_date_cell(f"{name}: поле date", meta["date"]),
+        status=meta["status"],
+        acl=tuple(dict.fromkeys(acl)),
+        supersedes=_optional(name, "supersedes", meta.get("supersedes")),
+        superseded_by=_optional(name, "superseded_by", meta.get("superseded_by")),
         body="\n".join(lines[end + 1 :]),
     )
 
 
-def _optional(value: Any) -> str | None:
-    return None if value in (None, "") else str(value)
+def _optional(name: str, field: str, value: Any) -> str | None:
+    if value is None or value in ("", *_YAML_NULLS):
+        return None
+    if not isinstance(value, str):
+        raise DatasetError(f"{name}: поле {field} должно быть строкой")
+    return value
 
 
 def _users(text: str) -> tuple[UserRecord, ...]:

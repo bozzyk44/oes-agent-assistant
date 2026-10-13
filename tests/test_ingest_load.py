@@ -135,11 +135,10 @@ def test_failure_in_the_middle_keeps_previous_dataset(database: Database, tmp_pa
 
     # Ошибка уже внутри транзакции загрузки: прежний набор остаётся целиком.
     broken = write_small_dataset(tmp_path / "broken")
-    production = (broken / "production.csv").read_text(encoding="utf-8")
-    (broken / "production.csv").write_text(
-        production.replace("K1,100", "K1,99999999999"), encoding="utf-8"
-    )
-    with pytest.raises(Exception, match="out of range"):
+    # Нулевой байт проходит проверку формата, но в текст базы не записывается.
+    document = (broken / "docs" / "R2.md").read_text(encoding="utf-8")
+    (broken / "docs" / "R2.md").write_text(document + "\x00", encoding="utf-8")
+    with pytest.raises(Exception, match="NUL"):
         database.load(broken)
 
     assert _counts(database) == before

@@ -59,6 +59,41 @@ def test_new_password_over_existing_volume_keeps_login_working(database: Databas
     assert _can_connect(database.service_url)
 
 
+def test_renamed_service_role_loses_access(database: Database) -> None:
+    # Имя роли сервиса сменили в окружении поверх существующей базы: прежняя учётная
+    # запись входить в базу больше не может.
+    renamed = replace(
+        database.accounts,
+        service=replace(database.accounts.service, role="test_app_renamed"),
+    )
+    with connect_admin(database.host, database.port, database.admin_password) as admin:
+        ensure_roles_and_databases(admin, renamed)
+        try:
+            assert _can_connect(
+                database.url("test_app_renamed", SERVICE_PASSWORD, "assistant_test")
+            )
+            assert not _can_connect(database.service_url)
+        finally:
+            ensure_roles_and_databases(admin, database.accounts)
+            admin.execute("drop role test_app_renamed")
+    assert _can_connect(database.service_url)
+
+
+def test_renamed_owner_stops_the_loader(database: Database) -> None:
+    # Объекты базы принадлежат прежнему владельцу: продолжать молча нельзя.
+    renamed = replace(
+        database.accounts, owner=replace(database.accounts.owner, role="test_owner_renamed")
+    )
+    with connect_admin(database.host, database.port, database.admin_password) as admin:
+        try:
+            with pytest.raises(StartupError, match="make reset"):
+                ensure_roles_and_databases(admin, renamed)
+        finally:
+            ensure_roles_and_databases(admin, database.accounts)
+            admin.execute("drop role test_owner_renamed")
+    assert _can_connect(database.owner_url)
+
+
 def test_connection_rights_are_granted_by_name(database: Database) -> None:
     assert _can_connect(database.url("test_app", SERVICE_PASSWORD, "assistant_test"))
     assert _can_connect(database.url("test_owner", OWNER_PASSWORD, "assistant_test"))

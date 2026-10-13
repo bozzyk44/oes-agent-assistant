@@ -126,8 +126,9 @@ if hidden or owned:
     sys.exit('роль сервиса видит строки КХД без привязки или владеет таблицами')
 try:
     create_engine(url.rsplit('/', 1)[0] + '/toir').connect()
-except OperationalError:
-    sys.exit(0)
+except OperationalError as error:
+    # Именно отказ в праве подключения: «базы нет» или «сервер недоступен» — не он.
+    sys.exit(0 if 'permission denied for database' in str(error) else 'вход в базу заглушки не проверен: ' + str(error.orig).split(chr(10))[0])
 sys.exit('роль сервиса вошла в базу заглушки')
 "
 }

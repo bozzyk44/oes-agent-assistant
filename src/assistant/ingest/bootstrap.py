@@ -100,15 +100,22 @@ def ensure_roles_and_databases(admin: psycopg.Connection, accounts: Accounts) ->
                     sql.Identifier(database), sql.Identifier(owner)
                 )
             )
-        else:
-            admin.execute(
-                sql.SQL("alter database {} owner to {}").format(
-                    sql.Identifier(database), sql.Identifier(owner)
-                )
+            continue
+        current = admin.execute(
+            "select pg_get_userbyid(datdba) from pg_database where datname = %s", (database,)
+        ).fetchone()
+        if current is None or current[0] != owner:
+            # Объекты базы принадлежат прежней роли, а её права никто не отзывал:
+            # тихо продолжать значило бы оставить старой учётной записи доступ.
+            raise StartupError(
+                f"база {database} создана с другим владельцем: имена ролей в адресах баз"
+                " изменились поверх существующего тома. Верните прежние имена"
+                " или удалите том командой `make reset`"
             )
 
     # Право подключения отозвано у всех и выдано поимённо: роль сервиса не входит
-    # в базу заглушки, роль заглушки — в базу сервиса.
+    # в базу заглушки, роль заглушки — в базу сервиса. Роль, которой в адресах больше
+    # нет, право теряет: смена имени роли сервиса не оставляет прежней учётной записи вход.
     allowed = {
         service_db: (accounts.owner.role, accounts.service.role),
         toir_db: (accounts.toir.role,),
@@ -116,6 +123,17 @@ def ensure_roles_and_databases(admin: psycopg.Connection, accounts: Accounts) ->
     for database, roles in allowed.items():
         name = sql.Identifier(database)
         admin.execute(sql.SQL("revoke all on database {} from public").format(name))
+        granted = admin.execute(
+            "select r.rolname from pg_database d, aclexplode(d.datacl) a"
+            " join pg_roles r on r.oid = a.grantee"
+            " where d.datname = %s and a.privilege_type = 'CONNECT'",
+            (database,),
+        ).fetchall()
+        for (stale,) in granted:
+            if stale not in roles and stale != "postgres":
+                admin.execute(
+                    sql.SQL("revoke all on database {} from {}").format(name, sql.Identifier(stale))
+                )
         for account in (accounts.owner, accounts.service, accounts.toir):
             role = sql.Identifier(account.role)
             if account.role in roles:

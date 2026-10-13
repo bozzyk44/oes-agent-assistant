@@ -320,6 +320,8 @@ $$;
 -- Один бит: лучший по рангу действующий фрагмент среди всех документов закрыт для
 -- текущего пользователя. Слова с цифрами в сравнении не участвуют, совпадение одного
 -- слова признаком не считается: по функции нельзя подбирать содержимое закрытого документа.
+-- Без привязки и для пользователя, которого нет в app.users, ответ всегда «нет» — как
+-- и политики, функция ничего не сообщает тому, кого приложение не знает.
 create function kb.best_match_is_closed(p_query text) returns boolean
 language sql stable security definer
 set search_path = pg_catalog, pg_temp
@@ -355,7 +357,7 @@ as $$
     select coalesce(
         (
             select
-                app.current_user_id() is not null
+                exists (select 1 from app.users u where u.user_id = app.current_user_id())
                 and best.matched >= 2
                 and not best.acl && (
                     array['all'] || array(

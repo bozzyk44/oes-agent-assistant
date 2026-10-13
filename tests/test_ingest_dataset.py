@@ -99,6 +99,23 @@ VIOLATIONS: list[tuple[str, Edit, str]] = [
     ("пустой acl", _replace("docs/A1.md", "acl: [all]", "acl: []"), "поля «acl»"),
     ("id не имя файла", _replace("docs/A1.md", "id: A1", "id: A2"), "id не совпадает"),
     ("дата документа", _replace("docs/A1.md", "date: 2026-01-10", "date: 10 января"), "поле date"),
+    ("нет такой даты", _replace("docs/A1.md", "date: 2026-01-10", "date: 2026-02-30"), "поле date"),
+    ("acl не список", _replace("docs/A1.md", "acl: [all]", "acl: {all: yes}"), "поле acl"),
+    (
+        "title не строка",
+        _replace("docs/A1.md", "title: Памятка для всех", "title: [а, б]"),
+        "title",
+    ),
+    (
+        "смена велика",
+        _replace("production.csv", ",1,K1,100", ",40000,K1,100"),
+        "production.csv:2: число",
+    ),
+    (
+        "тонны велики",
+        _replace("production.csv", "K1,100", "K1,99999999999"),
+        "production.csv:2: число",
+    ),
     ("не JSON", _write("users.json", b"[{"), "users.json: не разобран"),
     ("не массив", _write("users.json", b"{}"), "users.json: ожидался массив"),
     (
@@ -190,6 +207,23 @@ def test_unknown_fields_and_values_are_accepted(tmp_path: Path) -> None:
     assert dataset.users[0].kpi["fuel"] == ("K3",)
     assert dataset.users[-1].groups == () and dataset.users[-1].repair_requests == ()
     assert len(dataset.production) == 5
+
+
+def test_frontmatter_values_are_text_not_guessed_types(tmp_path: Path) -> None:
+    # YAML не угадывает типы: идентификатор из цифр с нулём впереди остаётся собой,
+    # группа с именем «no» — группой, а не ложью.
+    root = write_small_dataset(tmp_path)
+    (root / "docs" / "R1.md").rename(root / "docs" / "0012.md")
+    _replace("docs/0012.md", "id: R1", "id: 0012")(root)
+    _replace("docs/0012.md", "acl: [engineering, site-k1]", "acl: [no, 7, site-k1]")(root)
+    _replace("docs/R2.md", "supersedes: R1", "supersedes: 0012")(root)
+    _replace("docs/A1.md", "status: active", "status: yes")(root)
+    _replace("docs/H1.md", "---\n\n#", "superseded_by: ~\n---\n\n#")(root)
+    docs = {doc.doc_id: doc for doc in read_dataset(root, 1).documents}
+    assert docs["0012"].acl == ("no", "7", "site-k1")
+    assert docs["R2"].supersedes == "0012"
+    assert docs["A1"].status == "yes"
+    assert docs["H1"].superseded_by is None
 
 
 def test_hash_follows_data_and_loader_version_but_not_questions(tmp_path: Path) -> None:

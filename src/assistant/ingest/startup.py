@@ -59,12 +59,3 @@ def connect_admin(host: str, port: int, password: str) -> psycopg.Connection:
                 "или удалите том командой `make reset`"
             )
         raise StartupError(message) from exc
-
-
-def check_server(host: str, port: int, password: str) -> str:
-    """Входит администратором по сети и возвращает версию сервера."""
-    with connect_admin(host, port, password) as conn:
-        row = conn.execute("select current_setting('server_version')").fetchone()
-    if row is None:
-        raise StartupError("PostgreSQL не вернул версию сервера")
-    return str(row[0])
