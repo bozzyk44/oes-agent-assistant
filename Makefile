@@ -45,8 +45,9 @@ reset:
 migrate: env
 	$(COMPOSE) run --rm --build migrate
 
-# Проверка миграций отдельным шагом CI: применение на пустую базу, повтор, откат до нуля
-# и снова, сверка моделей со схемой. Эти же тесты входят и в `make test`.
+# Проверка миграций отдельным шагом CI: применение на пустую базу, повтор, откат каждой
+# миграции её собственным откатом и снова, сверка моделей со схемой. Эти же тесты входят
+# и в `make test`.
 migrate-check:
 	$(COMPOSE_TEST) build tests
 	@$(COMPOSE_TEST) run --rm tests pytest -p no:cacheprovider -m migrations; status=$$?; \

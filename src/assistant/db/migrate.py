@@ -11,7 +11,7 @@ from sqlalchemy import Connection, text
 
 _MIGRATIONS = Path(__file__).parent / "migrations"
 # Ключ блокировки на время миграции: произвольное число, одно на проект.
-_LOCK_KEY = 7_035_011
+LOCK_KEY = 7_035_011
 
 
 class SchemaMismatch(Exception):
@@ -62,12 +62,23 @@ def upgrade(connection: Connection) -> tuple[str | None, str]:
     """
     # Два шага миграций одновременно — `docker compose up` и `make migrate` из соседнего
     # терминала — идут по очереди: второй ждёт первого и видит схему уже доведённой.
-    connection.execute(text("select pg_advisory_xact_lock(:key)"), {"key": _LOCK_KEY})
+    connection.execute(text("select pg_advisory_xact_lock(:key)"), {"key": LOCK_KEY})
     before, head = current_revision(connection), head_revision()
     _reject_newer(before)
     if before != head:
         command.upgrade(_config(connection), "head")
     return before, head
+
+
+def revisions() -> list[str]:
+    """Все версии схемы по порядку применения, от первой к последней."""
+    script = ScriptDirectory.from_config(_config())
+    return [revision.revision for revision in reversed(list(script.walk_revisions()))]
+
+
+def upgrade_to(connection: Connection, revision: str) -> None:
+    """Доводит схему до названной версии; нужен проверке миграций, в запуске не используется."""
+    command.upgrade(_config(connection), revision)
 
 
 def downgrade(connection: Connection, revision: str = "base") -> None:

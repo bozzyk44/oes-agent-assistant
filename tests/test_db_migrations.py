@@ -15,12 +15,15 @@ from sqlalchemy import Connection, Engine, create_engine, inspect, text
 from assistant.db import models
 from assistant.db.grants import grant_service
 from assistant.db.migrate import (
+    LOCK_KEY,
     SchemaMismatch,
     current_revision,
     downgrade,
     head_revision,
     require_head,
+    revisions,
     upgrade,
+    upgrade_to,
 )
 from assistant.ingest.__main__ import load, main, migrate
 from assistant.ingest.startup import StartupError, connect_admin
@@ -149,20 +152,55 @@ def test_migrations_apply_to_empty_database_and_repeat_changes_nothing(empty: En
     assert _objects(empty) == first
 
 
-def test_downgrade_to_base_and_upgrade_again_gives_the_same_schema(empty: Engine) -> None:
+def test_each_migration_is_undone_by_its_own_downgrade(empty: Engine) -> None:
+    # Откат проверяется по одной версии: откат до нуля скрыл бы неполный откат поздней
+    # миграции за каскадным удалением схем в первой.
+    applied = revisions()
+    assert applied[-1] == head_revision()
+    for revision in applied:
+        before = _objects(empty)
+        with empty.begin() as connection:
+            upgrade_to(connection, revision)
+        after = _objects(empty)
+        assert after != before, f"миграция {revision} ничего не меняет в схеме"
+        with empty.begin() as connection:
+            downgrade(connection, "-1")
+        assert _objects(empty) == before, f"откат {revision} не вернул схему к прежнему виду"
+        with empty.begin() as connection:
+            upgrade_to(connection, revision)
+        # Повторное применение после отката даёт ту же схему, что и первое.
+        assert _objects(empty) == after, revision
+    with empty.connect() as connection:
+        assert current_revision(connection) == head_revision()
+
+
+def test_downgrade_to_base_leaves_nothing(empty: Engine) -> None:
     with empty.begin() as connection:
         upgrade(connection)
-    first = _objects(empty)
     with empty.begin() as connection:
         downgrade(connection)
     with empty.connect() as connection:
         assert current_revision(connection) is None
-    # Откат не оставляет за собой ни схем, ни объектов в них.
     assert _schemas(empty) == set()
     assert _objects(empty) == []
-    with empty.begin() as connection:
-        assert upgrade(connection) == (None, head_revision())
-    assert _objects(empty) == first
+
+
+def test_migration_holds_a_lock_until_commit(database: Database, empty: Engine) -> None:
+    # Два шага миграций одновременно идут по очереди: блокировка берётся до чтения версии
+    # и держится до конца транзакции.
+    held = text(
+        "select count(*) from pg_locks where locktype = 'advisory' and objid = :key and granted"
+    )
+    observer = create_engine(database.url("test_owner", OWNER_PASSWORD, PROBE))
+    try:
+        with empty.begin() as connection:
+            upgrade(connection)
+            with observer.connect() as other:
+                assert other.scalar(held, {"key": LOCK_KEY}) == 1
+        with observer.connect() as other:
+            assert other.scalar(held, {"key": LOCK_KEY}) == 0
+    finally:
+        observer.dispose()
 
 
 def test_models_match_migrated_schema(empty: Engine) -> None:
