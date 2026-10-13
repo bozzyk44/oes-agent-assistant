@@ -9,6 +9,7 @@ import filecmp
 import json
 import shutil
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -199,7 +200,10 @@ def _no_midnight(root: Path, world: World) -> None:
         cells = line.split(",")
         return cells[2][:10] == cells[3][:10]
 
-    _drop_line(root, "downtime.csv", same_day)
+    # Заголовок остаётся: без него проверка не прочла бы ни одной строки.
+    _drop_line(
+        root, "downtime.csv", lambda line: line.startswith("equipment_id,") or same_day(line)
+    )
 
 
 def _time_with_seconds(root: Path, world: World) -> None:
@@ -217,6 +221,13 @@ def _downtime_before_period(root: Path, world: World) -> None:
         f"{row.equipment_id},{row.site},{start},",
         f"{row.equipment_id},{row.site},{early},",
     )
+
+
+def _downtime_after_period(root: Path, world: World) -> None:
+    row = world.downtime[-1]
+    end = row.end.strftime("%Y-%m-%dT%H:%M")
+    late = (world.end + timedelta(days=3)).strftime("%Y-%m-%dT12:00")
+    _edit(root, "downtime.csv", f",{end},{row.reason}\n", f",{late},{row.reason}\n")
 
 
 def _few_excavators(root: Path, world: World) -> None:
@@ -244,7 +255,8 @@ def _few_excavators(root: Path, world: World) -> None:
         (_no_midnight, "полночь"),
         (_time_with_seconds, "время не вида"),
         (_downtime_before_period, "вне периода"),
-        (_few_excavators, "нужно не меньше"),
+        (_downtime_after_period, "вне периода"),
+        (_few_excavators, "«экскаватор» —"),
     ],
 )
 def test_format_check_catches_damage(
@@ -255,7 +267,11 @@ def test_format_check_catches_damage(
     shutil.copytree(root, copy)
     damage(copy, world)
     # Порча должна попасться той проверке, ради которой сделана, а не случайной соседней.
-    assert any(message in problem for problem in check_dataset(copy))
+    problems = check_dataset(copy)
+    assert any(message in problem for problem in problems)
+    # Порча не должна ломать сам файл: иначе проверка срабатывает оттого, что ничего не прочла.
+    if damage is not _break_header:
+        assert not any("заголовок не" in problem for problem in problems)
     assert main(["--check", str(copy)]) == 1
 
 
@@ -341,7 +357,7 @@ def _memo_repeats_warehouse(root: Path, world: World) -> None:
         (_leak_salary, "встречается в"),
         (_remove_instruction, "нет инструкции"),
         (_open_memo, "не закрыта"),
-        (_phone_in_order, "есть телефон"),
+        (_phone_in_order, "в приказе есть телефон"),
         (_memo_repeats_warehouse, "пересекаются"),
     ],
 )

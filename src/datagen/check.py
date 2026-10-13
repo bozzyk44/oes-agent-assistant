@@ -495,8 +495,10 @@ def _check_two_docs(world: World, docs: dict[str, DocFile], problems: list[str])
     order, contacts = docs["order"], docs["contacts"]
     for site in SITES:
         person = world.responsibles[site]
-        if person.person.name not in order.body or person.phone in order.body:
-            problems.append(f"{order.doc_id}: нет ответственного за ППР {site} или есть телефон")
+        if person.person.name not in order.body:
+            problems.append(f"{order.doc_id}: нет ответственного за ППР {site}")
+        if person.phone in order.body:
+            problems.append(f"{order.doc_id}: в приказе есть телефон ответственного за ППР {site}")
         if f"| {person.person.name} |" not in contacts.body or person.phone not in contacts.body:
             problems.append(f"{contacts.doc_id}: нет контакта ответственного за ППР {site}")
     if "ответствен" in contacts.body.lower():
