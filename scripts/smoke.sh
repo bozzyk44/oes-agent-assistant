@@ -55,9 +55,9 @@ if out=$(env -u POSTGRES_PASSWORD $COMPOSE --env-file /dev/null config 2>&1); th
     fail "compose принял пустое окружение"
 fi
 # Не заданы все обязательные переменные сразу; какую из них compose назовёт первой,
-# зависит от его версии. Достаточно, что названа любая и сказано, что делать.
+# зависит от его версии. Имя переменной стоит в самой подсказке, поэтому её достаточно.
 case "$out" in
-    *"required variable"*"создайте .env командой make run"*) ;;
+    *"required variable"*"не задан "*" — создайте .env командой make run"*) ;;
     *) fail "нет имени переменной или подсказки: $out" ;;
 esac
 
@@ -117,7 +117,7 @@ fi
 
 step "make eval QUESTIONS=<путь с пробелами> монтирует каталог своего файла"
 $MAKE eval COMPOSE_PROJECT="$SMOKE_PROJECT" QUESTIONS=".smoke/q dir/my questions.jsonl" \
-    EVAL_ARGS='sh -c "test -f \"\$$QUESTIONS\" && test -d /data && test -w /app/eval"' \
+    EVAL_ARGS='sh -c "test \"\$$QUESTIONS\" = \"/questions/my questions.jsonl\" && test -f \"\$$QUESTIONS\" && test -d /data && test -w /app/eval"' \
     || fail "make eval не увидел свой файл вопросов"
 
 step "сервис и заглушка отвечают внутри сети"
