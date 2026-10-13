@@ -98,6 +98,21 @@ def test_service_role_reads_grants(database: Database, small: object) -> None:
         assert connection.scalar(text("select count(*) from app.user_groups")) == 4
 
 
+@pytest.mark.parametrize("lexeme", ["слово", "a\\b'c", "'", "\\", "a:b&c|d!e", "д'Артаньян"])
+def test_lexeme_is_quoted_for_tsquery(database: Database, lexeme: str) -> None:
+    # Любая строка в записи лексемы приводится к запросу без ошибки и остаётся собой.
+    with database.owner.connect() as connection:
+        query = connection.scalar(text("select kb.lexeme(:l)::tsquery::text"), {"l": lexeme})
+        same = connection.scalar(
+            text("select array_to_tsvector(array[cast(:l as text)]) @@ kb.lexeme(:l)::tsquery"),
+            {"l": lexeme},
+        )
+    assert query
+    assert same is True
+    with database.service.connect() as connection, pytest.raises(DBAPIError, match="permission"):
+        connection.execute(text("select kb.lexeme('x')"))
+
+
 def test_bypass_functions_are_callable_only_by_service_role(database: Database) -> None:
     functions = (
         "kb.document_exists(text)",

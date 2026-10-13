@@ -150,7 +150,10 @@ class Action(Base):
     request_id: Mapped[str | None] = mapped_column(Text)
     failure_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_BY_DB)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_BY_DB)
+    # Меняется триггером при каждом переходе.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=_BY_DB, server_onupdate=_BY_DB
+    )
 
 
 class Production(Base):

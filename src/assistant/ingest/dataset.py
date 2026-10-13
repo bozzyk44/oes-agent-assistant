@@ -33,6 +33,8 @@ _TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 _INT = re.compile(r"-?\d+")
 _FIELD = re.compile(r"([A-Za-z_][\w-]*):(?:\s+(.*)|())")
 _LIST_ITEM = re.compile(r"\s*-\s+(.*)")
+_COMMENT = re.compile(r"\s+#.*")
+_ID_LINE = re.compile(r"id:\s")
 # Как YAML записывает отсутствие значения; типы не угадываются, поэтому сравнение по тексту.
 _YAML_NULLS = ("null", "Null", "NULL", "~")
 # Границы целых колонок базы: значение вне их названо с файлом и строкой, а не ошибкой базы.
@@ -184,7 +186,14 @@ def _document(name: str, stem: str, text: str) -> DocumentFile | None:
     а посторонний файл в каталоге — он пропускается и называется в выводе загрузчика.
     """
     lines = text.splitlines()
+    # Пустые строки перед frontmatter — не повод потерять документ.
+    while lines and not lines[0].strip():
+        lines = lines[1:]
     if not lines or lines[0].strip() != "---":
+        # Файл с полем id, но без открывающей строки — испорченный документ, а не посторонний
+        # файл: пропустить его молча значило бы потерять документ из индекса.
+        if any(_ID_LINE.match(line) for line in lines[:10]):
+            raise DatasetError(f"{name}:1: документ должен начинаться с frontmatter «---»")
         return None
     try:
         end = next(i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---")
@@ -244,11 +253,11 @@ def _frontmatter(name: str, lines: list[str]) -> dict[str, Any]:
         raise DatasetError(f"{name}{line}: frontmatter не разобран") from exc
     if not isinstance(meta, dict):
         raise DatasetError(f"{name}: frontmatter должен быть набором «поле: значение»")
-    for key, raw in plain.items():
-        value = meta.get(key)
-        cut_by_comment = isinstance(raw, str) and isinstance(value, str) and " #" in raw
-        if cut_by_comment and raw != value and raw.startswith(value):
-            meta[key] = raw
+    # Только название: в остальных полях « # …» — обычный комментарий YAML, и его место
+    # за пределами значения. Название же с решёткой — «Приказ #12» — обрезалось бы молча.
+    raw, value = plain.get("title"), meta.get("title")
+    if isinstance(raw, str) and isinstance(value, str) and raw != value and raw.startswith(value):
+        meta["title"] = raw
     return {str(key): value for key, value in meta.items()}
 
 
@@ -273,7 +282,8 @@ def _plain_fields(lines: list[str]) -> dict[str, Any]:
             # Пустое значение; станет списком, если дальше идут строки «- элемент».
             fields[current] = ""
         elif rest[0] not in "[{":
-            fields[current] = _unquote(rest)
+            # Хвост « # …» — комментарий; у названия он остаётся частью текста.
+            fields[current] = _unquote(rest if current == "title" else _COMMENT.sub("", rest))
         elif rest[0] == "[" and rest.endswith("]"):
             fields[current] = [_unquote(part) for part in rest[1:-1].split(",") if part.strip()]
         else:

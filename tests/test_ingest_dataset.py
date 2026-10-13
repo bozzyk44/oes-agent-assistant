@@ -40,6 +40,8 @@ def _no_docs(root: Path) -> None:
 
 
 VIOLATIONS: list[tuple[str, Edit, str]] = [
+    # Поле id есть, открывающей строки нет: испорченный документ, а не посторонний файл.
+    ("нет открывающей строки", _replace("docs/A1.md", "---\nid: A1", "id: A1"), "docs/A1.md:1:"),
     ("нет документов", _no_docs, "docs: нет ни одного документа"),
     ("нет пользователей", _remove("users.json"), "users.json: файл не читается"),
     ("нет таблицы", _remove("downtime.csv"), "downtime.csv: файл не читается"),
@@ -249,12 +251,37 @@ def test_template_built_frontmatter_is_read(tmp_path: Path) -> None:
     assert docs["R1"].acl == ()
 
 
+def test_yaml_comments_stay_comments_outside_title(tmp_path: Path) -> None:
+    # Формат задания — YAML: хвост « # …» в поле — комментарий, а не часть значения.
+    root = write_small_dataset(tmp_path)
+    _replace("docs/R2.md", "status: active", "status: active # действует")(root)
+    _replace("docs/R2.md", "date: 2026-01-10", "date: 2026-01-10 # утверждён")(root)
+    _replace("docs/R2.md", "id: R2", "id: R2 # вторая редакция")(root)
+    _replace("docs/R2.md", "supersedes: R1", "supersedes: R1 # прежняя")(root)
+    _replace("docs/A1.md", "acl: [all]", "acl: all # всем")(root)
+    _replace("docs/H1.md", "acl: [hr]", "acl: [hr] # кадры")(root)
+    # То же, когда YAML не справился с названием и поля читаются построчно.
+    _replace("docs/R1.md", "title: Регламент ремонта", "title: Регламент: ремонт #1")(root)
+    _replace("docs/R1.md", "status: superseded", "status: superseded # утратил силу")(root)
+    _replace("docs/R1.md", "superseded_by: R2", "superseded_by: R2 # действующая")(root)
+    docs = {doc.doc_id: doc for doc in read_dataset(root, 1).documents}
+    assert (docs["R2"].status, docs["R2"].supersedes) == ("active", "R1")
+    assert docs["R2"].date.isoformat() == "2026-01-10"
+    assert docs["A1"].acl == ("all",)
+    assert docs["H1"].acl == ("hr",)
+    assert docs["R1"].title == "Регламент: ремонт #1"
+    assert (docs["R1"].status, docs["R1"].superseded_by) == ("superseded", "R2")
+
+
 def test_file_without_frontmatter_is_skipped_and_named(tmp_path: Path) -> None:
     root = write_small_dataset(tmp_path)
     (root / "docs" / "README.md").write_text("# Заметки к набору\n", encoding="utf-8")
     dataset = read_dataset(root, 1)
     assert dataset.skipped == ("docs/README.md",)
     assert [doc.doc_id for doc in dataset.documents] == ["A1", "H1", "R1", "R2"]
+    # Пустые строки перед frontmatter документ не теряют.
+    _replace("docs/A1.md", "---\nid: A1", "\n\n---\nid: A1")(root)
+    assert [doc.doc_id for doc in read_dataset(root, 1).documents] == ["A1", "H1", "R1", "R2"]
     for path in (root / "docs").glob("[A-Z][0-9].md"):
         path.unlink()
     with pytest.raises(DatasetError, match="ни в одном файле"):

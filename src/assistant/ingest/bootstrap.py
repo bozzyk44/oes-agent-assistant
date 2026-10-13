@@ -120,7 +120,7 @@ def ensure_roles_and_databases(admin: psycopg.Connection, accounts: Accounts) ->
         service_db: (accounts.owner.role, accounts.service.role),
         toir_db: (accounts.toir.role,),
     }
-    # Служебная база администратора ролям приложения не нужна: в ней виден список баз и ролей.
+    # Служебная база администратора ролям приложения не нужна.
     admin.execute("revoke connect on database postgres from public")
     for database, roles in allowed.items():
         name = sql.Identifier(database)
