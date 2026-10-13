@@ -23,10 +23,11 @@ from assistant.turn.runner import (
     LOST_CAPTURE_ERROR,
     MODEL_NOT_CONFIGURED,
     TIMEOUT_ERROR,
+    CitationRef,
     StoredMessage,
     TurnContext,
     TurnResult,
-    UsageTotals,
+    UsageMeter,
     empty_prefix_hash,
 )
 from tests.conftest import PROBE, SERVICE_PASSWORD, Database
@@ -139,12 +140,14 @@ def test_configured_model_without_loop_says_so(database: Database, small: Path) 
 
 def test_successful_turn_is_returned_and_stored(database: Database, small: Path) -> None:
     def behave(context: TurnContext) -> TurnResult:
+        # Два вызова модели: расход записывается сразу после каждого.
+        context.usage.record(input_tokens=3480, output_tokens=110, cached=2048)
+        context.usage.record(input_tokens=2640, output_tokens=100, cached=0)
         return TurnResult(
             outcome="answer",
             answer="8 часов",
             prefix_hash="hash-1",
-            citations=({"doc_id": "A1", "chunk_id": "A1#1"},),
-            usage=UsageTotals(2, 6120, 2048, 210, 3480),
+            citations=(CitationRef("A1", "A1#1"),),
             record={"calls": 2},
             messages=(
                 StoredMessage("user", {"text": context.message}),
@@ -214,6 +217,50 @@ def test_bad_body_is_422_and_nothing_happens(
     assert _session(database, "u-eng", "s") is None
 
 
+def test_user_is_checked_before_body(service: Service) -> None:
+    # Без заголовка и для неизвестного пользователя — 401, каким бы ни было тело.
+    for headers in ({}, {"X-User-ID": "u-nobody"}):
+        for body in ({}, {"session_id": "s", "message": "м" * 201}, {"лишнее": 1}):
+            response = service.client.post("/turn", json=body, headers=headers)
+            assert response.status_code == 401, (headers, body)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"session_id": "s", "message": "abc\\u0000"}',
+        b'{"session_id": "s\\u0000", "message": "abc"}',
+        # Половинка суррогатной пары: в UTF-8 не кодируется, в базу не записывается.
+        b'{"session_id": "s", "message": "abc\\ud800"}',
+    ],
+)
+def test_text_the_database_cannot_store_is_422_before_the_turn(
+    service: Service, database: Database, raw: bytes
+) -> None:
+    response = service.client.post(
+        "/turn", content=raw, headers={"X-User-ID": "u-eng", "Content-Type": "application/json"}
+    )
+    assert response.status_code == 422
+    # Ответ называет поле и причину, но не возвращает сам ввод.
+    detail = response.json()["detail"]
+    assert detail and all(set(item) == {"loc", "msg", "type"} for item in detail)
+    assert "abc" not in response.text
+    assert _session(database, "u-eng", "s") is None
+
+
+def test_usage_meter_sums_calls_and_keeps_unknown_cache_as_null() -> None:
+    meter = UsageMeter()
+    assert meter.totals.model_calls == 0 and meter.totals.cached_input_tokens is None
+    meter.record(input_tokens=500, output_tokens=20)
+    # Провайдер не отдаёт кэшированный вход — остаётся null, а не ноль.
+    assert meter.totals.cached_input_tokens is None
+    meter.record(input_tokens=800, output_tokens=30, cached=300)
+    meter.record(input_tokens=600, output_tokens=10)
+    totals = meter.totals
+    assert (totals.model_calls, totals.input_tokens, totals.output_tokens) == (3, 1900, 60)
+    assert (totals.cached_input_tokens, totals.max_call_input_tokens) == (300, 800)
+
+
 # --- захват сессии
 
 
@@ -266,6 +313,9 @@ def test_error_inside_turn_is_outcome_error_and_releases_at_once(
     database: Database, small: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     def behave(context: TurnContext) -> TurnResult:
+        # Два вызова модели уже сделаны и оплачены, когда инструмент падает.
+        context.usage.record(input_tokens=900, output_tokens=40)
+        context.usage.record(input_tokens=1200, output_tokens=60)
         raise RuntimeError("секретная подробность сбоя")
 
     service = make_service(database.service, database.service_url, Scripted(behave))
@@ -279,6 +329,17 @@ def test_error_inside_turn_is_outcome_error_and_releases_at_once(
     # Подробности — в журнале сервиса.
     assert "секретная подробность" in caplog.text
     assert _turns(database, session) == [("u-eng", "error", INTERNAL_ERROR)]
+    # Расход уже сделанных вызовов сохраняется и в ответе, и в записи хода.
+    usage = reply.body["usage"]
+    assert isinstance(usage, dict)
+    assert (usage["model_calls"], usage["input_tokens"], usage["output_tokens"]) == (2, 2100, 100)
+    assert usage["max_call_input_tokens"] == 1200 and usage["cached_input_tokens"] is None
+    with database.owner.connect() as connection:
+        stored = connection.execute(
+            text("select model_calls, input_tokens from app.turns where turn_id = :t"),
+            {"t": reply.body["turn_id"]},
+        ).one()
+    assert stored == (2, 2100)
     # Отметка снята сразу, а не по сроку: часы не переводились.
     assert _session(database, "u-eng", session) == (None, None)
     assert service.turn("u-eng", session).status == 200
@@ -310,6 +371,27 @@ def test_turn_that_outlived_its_lease_writes_nothing(database: Database, small: 
     assert held is not None and held[1] == other
 
 
+def test_failed_write_is_an_internal_error_not_a_lost_capture(
+    database: Database, small: Path
+) -> None:
+    def behave(context: TurnContext) -> TurnResult:
+        context.usage.record(input_tokens=700, output_tokens=30)
+        # Исход, которого база не примет: запись хода падает на ограничении.
+        return TurnResult(outcome="выдуманный", answer="ответ вовремя", prefix_hash="h")
+
+    service = make_service(database.service, database.service_url, Scripted(behave))
+    session = new_session()
+    reply = service.turn("u-eng", session)
+    assert reply.status == 200
+    # Ход уложился в срок: клиенту не говорят, что он опоздал.
+    assert (reply.body["outcome"], reply.body["answer"]) == ("error", INTERNAL_ERROR)
+    assert "ответ вовремя" not in reply.text
+    assert _turns(database, session) == []
+    # Отметка снята отдельной транзакцией: сессия не ждёт истечения срока.
+    assert _session(database, "u-eng", session) == (None, None)
+    assert service.turn("u-eng", session).status == 200
+
+
 def test_turn_has_an_overall_time_limit(database: Database, small: Path) -> None:
     handler = Scripted()
     service = make_service(database.service, database.service_url, handler)
@@ -318,9 +400,9 @@ def test_turn_has_an_overall_time_limit(database: Database, small: Path) -> None
         assert context.deadline.remaining() == service.runtime.settings.turn_timeout_seconds
         service.clock.mono += service.runtime.settings.turn_timeout_seconds
         assert context.deadline.expired()
-        return TurnResult(
-            outcome="answer", answer="поздно", prefix_hash="h", usage=UsageTotals(model_calls=3)
-        )
+        for _ in range(3):
+            context.usage.record(input_tokens=100, output_tokens=10)
+        return TurnResult(outcome="answer", answer="поздно", prefix_hash="h")
 
     handler.behave = behave
     session = new_session()

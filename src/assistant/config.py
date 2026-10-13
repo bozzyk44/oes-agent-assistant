@@ -5,11 +5,15 @@
 неоткуда.
 """
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 # Метка из .env.example: значение, которое `make run` заменяет случайным секретом.
 PLACEHOLDER = "__GENERATE__"
+# Верхние границы настроек: сутки и миллион символов заведомо больше любого разумного хода.
+_MAX_SECONDS = 86_400
+_MAX_CHARS = 1_000_000
 
 
 class ConfigError(Exception):
@@ -32,6 +36,8 @@ class ModelSettings:
 @dataclass(frozen=True)
 class Settings:
     database_url: str = field(repr=False)
+    # Каталог набора из задания. Сервис его не читает — набор приходит из базы, куда его
+    # кладёт загрузчик; значение держится здесь как часть контракта окружения.
     data_dir: str
     model: ModelSettings
     toir_url: str
@@ -48,7 +54,7 @@ class ToirSecret:
     token: str = field(repr=False)
 
 
-def _number(env: Mapping[str, str], name: str, default: float) -> float:
+def _seconds(env: Mapping[str, str], name: str, default: float) -> float:
     raw = env.get(name, "").strip()
     if not raw:
         return default
@@ -56,9 +62,19 @@ def _number(env: Mapping[str, str], name: str, default: float) -> float:
         value = float(raw)
     except ValueError:
         raise ConfigError(f"{name}: ожидалось число") from None
-    if value <= 0:
-        raise ConfigError(f"{name}: ожидалось положительное число")
+    # nan и inf — тоже «числа»: первое молча выключило бы предел, второе роняло бы ход.
+    if not math.isfinite(value) or not 0 < value <= _MAX_SECONDS:
+        raise ConfigError(f"{name}: ожидалось число секунд от 0 до {_MAX_SECONDS}")
     return value
+
+
+def _count(env: Mapping[str, str], name: str, default: int) -> int:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    if not raw.isascii() or not raw.isdigit() or not 0 < int(raw) <= _MAX_CHARS:
+        raise ConfigError(f"{name}: ожидалось целое число от 1 до {_MAX_CHARS}")
+    return int(raw)
 
 
 def _required(env: Mapping[str, str], name: str) -> str:
@@ -83,9 +99,9 @@ def load_settings(env: Mapping[str, str]) -> Settings:
             name=env.get("MODEL_NAME", "").strip(),
         ),
         toir_url=env.get("TOIR_URL") or "http://toir:8001",
-        max_message_chars=int(_number(env, "MAX_MESSAGE_CHARS", 4000)),
-        turn_timeout_seconds=_number(env, "TURN_TIMEOUT_SECONDS", 90),
-        session_lease_seconds=_number(env, "SESSION_LEASE_SECONDS", 120),
+        max_message_chars=_count(env, "MAX_MESSAGE_CHARS", 4000),
+        turn_timeout_seconds=_seconds(env, "TURN_TIMEOUT_SECONDS", 90),
+        session_lease_seconds=_seconds(env, "SESSION_LEASE_SECONDS", 120),
     )
     if settings.turn_timeout_seconds >= settings.session_lease_seconds:
         raise ConfigError(

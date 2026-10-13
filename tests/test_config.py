@@ -66,6 +66,13 @@ def test_secrets_are_not_in_repr() -> None:
         ({**BASE, "TURN_TIMEOUT_SECONDS": "много"}, "TURN_TIMEOUT_SECONDS"),
         ({**BASE, "MAX_MESSAGE_CHARS": "0"}, "MAX_MESSAGE_CHARS"),
         ({**BASE, "SESSION_LEASE_SECONDS": "-5"}, "SESSION_LEASE_SECONDS"),
+        # «Числа», которые молча выключили бы предел времени или роняли бы каждый ход.
+        ({**BASE, "TURN_TIMEOUT_SECONDS": "nan"}, "TURN_TIMEOUT_SECONDS"),
+        ({**BASE, "SESSION_LEASE_SECONDS": "inf"}, "SESSION_LEASE_SECONDS"),
+        ({**BASE, "SESSION_LEASE_SECONDS": "1e400"}, "SESSION_LEASE_SECONDS"),
+        ({**BASE, "MAX_MESSAGE_CHARS": "0.5"}, "MAX_MESSAGE_CHARS"),
+        ({**BASE, "MAX_MESSAGE_CHARS": "1e400"}, "MAX_MESSAGE_CHARS"),
+        ({**BASE, "MAX_MESSAGE_CHARS": "-3"}, "MAX_MESSAGE_CHARS"),
         # Предел времени хода обязан быть короче срока отметки занятости.
         ({**BASE, "TURN_TIMEOUT_SECONDS": "120", "SESSION_LEASE_SECONDS": "120"}, "меньше"),
     ],

@@ -12,6 +12,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -52,21 +53,57 @@ class Deadline:
 
 
 @dataclass(frozen=True)
-class TurnContext:
-    turn_id: str
-    user_id: str
-    session_id: str
-    message: str
-    deadline: Deadline
-
-
-@dataclass(frozen=True)
 class UsageTotals:
     model_calls: int = 0
     input_tokens: int = 0
     cached_input_tokens: int | None = None
     output_tokens: int = 0
     max_call_input_tokens: int = 0
+
+
+class UsageMeter:
+    """Расход хода. Обработчик записывает сюда каждый вызов модели сразу после ответа,
+    поэтому расход уже сделанных вызовов сохраняется, чем бы ход ни кончился —
+    ответом, превышением срока или исключением.
+    """
+
+    def __init__(self) -> None:
+        self._totals = UsageTotals()
+
+    def record(self, input_tokens: int, output_tokens: int, cached: int | None = None) -> None:
+        """Фактические числа одного вызова из ответа провайдера."""
+        before = self._totals
+        known = before.cached_input_tokens is not None or cached is not None
+        self._totals = UsageTotals(
+            model_calls=before.model_calls + 1,
+            input_tokens=before.input_tokens + input_tokens,
+            # Провайдер не отдаёт кэшированный вход ни в одном вызове — остаётся null.
+            cached_input_tokens=(before.cached_input_tokens or 0) + (cached or 0)
+            if known
+            else None,
+            output_tokens=before.output_tokens + output_tokens,
+            max_call_input_tokens=max(before.max_call_input_tokens, input_tokens),
+        )
+
+    @property
+    def totals(self) -> UsageTotals:
+        return self._totals
+
+
+@dataclass(frozen=True)
+class TurnContext:
+    turn_id: str
+    user_id: str
+    session_id: str
+    message: str
+    deadline: Deadline
+    usage: UsageMeter
+
+
+@dataclass(frozen=True)
+class CitationRef:
+    doc_id: str
+    chunk_id: str
 
 
 @dataclass(frozen=True)
@@ -80,11 +117,12 @@ class StoredMessage:
 
 @dataclass(frozen=True)
 class TurnResult:
+    """Итог тела хода. Расхода здесь нет: он копится в `TurnContext.usage`."""
+
     outcome: str
     answer: str
     prefix_hash: str
-    citations: tuple[dict[str, str], ...] = ()
-    usage: UsageTotals = field(default_factory=UsageTotals)
+    citations: tuple[CitationRef, ...] = ()
     # Запись хода для диагностики и сообщения для истории; у хода с ошибкой истории нет.
     record: dict[str, Any] = field(default_factory=dict)
     messages: tuple[StoredMessage, ...] = ()
@@ -111,13 +149,23 @@ class Runtime:
     new_token: Callable[[], UUID]
 
 
+class Stored(Enum):
+    """Чем кончилась завершающая транзакция."""
+
+    YES = "записан"
+    # Метка захвата уже не своя: срок истёк, и сессию занял другой ход.
+    LOST_CAPTURE = "пережил отметку"
+    # Запись не удалась по другой причине: сбой базы, нарушение ограничения.
+    FAILED = "не записан"
+
+
 @dataclass(frozen=True)
 class Finished:
     turn_id: str
     result: TurnResult
+    usage: UsageTotals
     latency_ms: int
-    # Ход записан в базу; `False` — он пережил свою отметку или запись не удалась.
-    stored: bool
+    stored: Stored
 
 
 def empty_prefix_hash() -> str:
@@ -160,16 +208,15 @@ def run_turn(runtime: Runtime, user_id: str, session_id: str, message: str) -> F
         raise SessionBusy
 
     deadline = Deadline(runtime.monotonic, started + settings.turn_timeout_seconds)
-    context = TurnContext(turn_id, user_id, session_id, message, deadline)
+    meter = UsageMeter()
+    context = TurnContext(turn_id, user_id, session_id, message, deadline, meter)
     try:
         result = runtime.handler(context)
         if deadline.expired():
-            # Расход уже сделанных вызовов сохраняется, ответ — нет.
             result = TurnResult(
                 outcome="error",
                 answer=TIMEOUT_ERROR,
                 prefix_hash=result.prefix_hash,
-                usage=result.usage,
                 record=result.record,
             )
     except Exception:
@@ -181,30 +228,29 @@ def run_turn(runtime: Runtime, user_id: str, session_id: str, message: str) -> F
 
     latency_ms = int((runtime.monotonic() - started) * 1000)
     stored = _finish(runtime, context, token, result, latency_ms)
-    if not stored and result.outcome != "error":
+    if stored is not Stored.YES and result.outcome != "error":
         # Ответ, который не записан, клиенту не отдаётся: в истории его не будет.
         result = TurnResult(
             outcome="error",
-            answer=LOST_CAPTURE_ERROR,
+            answer=LOST_CAPTURE_ERROR if stored is Stored.LOST_CAPTURE else INTERNAL_ERROR,
             prefix_hash=result.prefix_hash,
-            usage=result.usage,
         )
-    return Finished(turn_id, result, latency_ms, stored)
+    return Finished(turn_id, result, meter.totals, latency_ms, stored)
 
 
 def _finish(
     runtime: Runtime, context: TurnContext, token: UUID, result: TurnResult, latency_ms: int
-) -> bool:
+) -> Stored:
     """Завершающая транзакция: снять отметку под своей меткой и записать ход и сообщения.
 
     Отметка снимается здесь же и при ошибке внутри хода — сразу, а не по сроку.
     """
+    usage = context.usage.totals
     try:
         with transaction(runtime.engine, context.user_id) as connection:
             if not release(connection, context.user_id, context.session_id, token):
-                # Метка уже не своя: срок истёк, и сессию занял другой ход. Писать нечего.
                 log.warning("ход %s пережил свою отметку занятости", context.turn_id)
-                return False
+                return Stored.LOST_CAPTURE
             connection.execute(
                 insert(models.Turn).values(
                     turn_id=context.turn_id,
@@ -213,12 +259,15 @@ def _finish(
                     question=context.message,
                     outcome=result.outcome,
                     answer=result.answer,
-                    citations=list(result.citations),
-                    model_calls=result.usage.model_calls,
-                    input_tokens=result.usage.input_tokens,
-                    cached_input_tokens=result.usage.cached_input_tokens,
-                    output_tokens=result.usage.output_tokens,
-                    max_call_input_tokens=result.usage.max_call_input_tokens,
+                    citations=[
+                        {"doc_id": item.doc_id, "chunk_id": item.chunk_id}
+                        for item in result.citations
+                    ],
+                    model_calls=usage.model_calls,
+                    input_tokens=usage.input_tokens,
+                    cached_input_tokens=usage.cached_input_tokens,
+                    output_tokens=usage.output_tokens,
+                    max_call_input_tokens=usage.max_call_input_tokens,
                     prefix_hash=result.prefix_hash,
                     latency_ms=latency_ms,
                     record=result.record,
@@ -240,7 +289,7 @@ def _finish(
                         for seq, message in enumerate(result.messages, start=1)
                     ],
                 )
-        return True
+        return Stored.YES
     except Exception:
         log.exception("ход %s не записан", context.turn_id)
     # Запись не прошла и откатилась вместе со снятием отметки: снимаем её отдельно,
@@ -250,4 +299,4 @@ def _finish(
             release(connection, context.user_id, context.session_id, token)
     except Exception:
         log.exception("отметка занятости хода %s не снята, истечёт по сроку", context.turn_id)
-    return False
+    return Stored.FAILED

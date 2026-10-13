@@ -1,17 +1,33 @@
 """Схемы запросов и ответов API — контракт задания, раздел «API»."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 Outcome = Literal["answer", "refusal", "no_data", "action", "budget_exceeded", "error"]
+
+
+def _storable(value: str) -> str:
+    """Текст, который можно записать в базу: без нулевого символа и половинок суррогатных
+    пар. Иначе ошибка всплыла бы при записи хода — после того, как он уже выполнен.
+    """
+    if "\x00" in value:
+        raise ValueError("нулевой символ в тексте")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("текст не кодируется в UTF-8") from None
+    return value
+
+
+Text = Annotated[str, AfterValidator(_storable)]
 
 
 class TurnRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    session_id: str = Field(min_length=1, max_length=200)
-    message: str = Field(min_length=1)
+    session_id: Text = Field(min_length=1, max_length=200)
+    message: Text = Field(min_length=1)
 
 
 class Citation(BaseModel):
