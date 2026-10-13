@@ -1,0 +1,51 @@
+[project]
+name = "oes-agent-assistant"
+version = "0.1.0"
+description = "Ассистент сотрудника с правами доступа: тестовое задание"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "fastapi>=0.115",
+    "psycopg[binary]>=3.2",
+    "uvicorn>=0.34",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28",
+    "mypy>=1.15",
+    "pytest>=8.3",
+    "ruff>=0.9",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PTH", "RUF", "S", "T20"]
+# RUF001–RUF003: тексты и комментарии на русском, буквы вроде «с» и «о» — не опечатки.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+# Точки входа командной строки печатают в stdout намеренно.
+"src/*/__main__.py" = ["T201"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+mypy_path = "src"
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+xfail_strict = true
+markers = [
+    "db: тест ходит в PostgreSQL",
+]

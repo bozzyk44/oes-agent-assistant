@@ -1,0 +1,25 @@
+# Те же цели make, что и в локальном CI (`make ci`). Основная проверка — локальная;
+# этот сценарий — вторая, независимая машина: чистый Linux без кэша образов.
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Линтер, типы, тесты
+        run: make test
+      - name: Сценарий сборки
+        run: make smoke
