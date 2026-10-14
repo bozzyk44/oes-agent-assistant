@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Стенд в облаке: сервер — Terraform в infra/terraform, сервис — тот же compose, что локально.
+#
+#   scripts/stand.sh up       создать сервер (спросит подтверждение) и развернуть сервис
+#   scripts/stand.sh deploy   выкатить текущий коммит на уже созданный сервер
+#   scripts/stand.sh down     удалить стенд (спросит подтверждение)
+#
+# На сервер уходит закоммиченный код (`git archive`, вместе с data/) и из локального .env —
+# только настройки модели и цены. Пароли базы и TOIR_TOKEN сервер создаёт себе сам из
+# .env.example при первом развёртывании и хранит между выкатками. Ключа облака на сервере нет.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+tf="$root/infra/terraform/tf.sh"
+env_file="${ENV_FILE:-$root/.env}"
+login="${STAND_LOGIN:-oes}"
+# Ключ хоста — свой файл: при пересоздании стенда адрес может повториться с новым ключом.
+state="$root/.stand"
+known="$state/known_hosts"
+# Каталоги на сервере: код заменяется при каждой выкатке, .env остаётся.
+remote_home="oes"
+
+# Что из локального .env нужно серверу: модель и цены. Секреты базы и ТОиР — свои на сервере.
+MODEL_VARS="MODEL_BASE_URL MODEL_API_KEY MODEL_NAME MODEL_MAX_OUTPUT_TOKENS MODEL_TIMEOUT_SECONDS
+MODEL_RESPONSE_FORMAT MODEL_EXTRA_BODY MODEL_TOKEN_CHARS PRICE_INPUT PRICE_CACHED PRICE_OUTPUT"
+
+die() { echo "stand: $*" >&2; exit 1; }
+
+host() {
+    local ip
+    ip="$("$tf" output -raw public_ip 2>/dev/null)" || die "стенда нет: сначала scripts/stand.sh up"
+    [[ -n "$ip" ]] || die "Terraform не вернул адрес стенда"
+    echo "$login@$ip"
+}
+
+remote() {
+    ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile="$known" "$target" "$@"
+}
+
+# Сервер отвечает по SSH и закончил первую настройку: Docker стоит.
+wait_ready() {
+    local attempt
+    for attempt in $(seq 1 60); do
+        if remote true 2>/dev/null; then
+            break
+        fi
+        [[ "$attempt" == 60 ]] && die "сервер не отвечает по SSH"
+        sleep 5
+    done
+    echo "stand: жду окончания первой настройки сервера"
+    remote cloud-init status --wait >/dev/null || die "первая настройка сервера не удалась: cloud-init status --long на сервере"
+}
+
+# Настройки модели из локального .env, строками ИМЯ=значение. Файл не исполняется. Каждое имя
+# передаётся, отсутствующее — пустым: иначе на сервере осталось бы значение прошлой выкатки.
+model_env() {
+    local name line
+    [[ -f "$env_file" ]] || die "нет $env_file с настройками модели"
+    for name in $MODEL_VARS; do
+        line="$(grep -E "^${name}=" "$env_file" | tail -n 1 || true)"
+        printf '%s\n' "${line:-$name=}"
+    done
+}
+
+deploy() {
+    target="$(host)"
+    mkdir -p "$state"
+    wait_ready
+
+    [[ -z "$(git -C "$root" status --porcelain)" ]] \
+        || echo "stand: в рабочей копии есть незакоммиченные изменения — выкатывается коммит без них" >&2
+    local sha
+    sha="$(git -C "$root" rev-parse --short HEAD)"
+    echo "stand: выкатываю коммит $sha на $target"
+
+    # Настройки модели — через stdin, а не в аргументах: аргументы видны в списке процессов.
+    model_env | remote "umask 077 && mkdir -p $remote_home && cat > $remote_home/model.env"
+    git -C "$root" archive HEAD \
+        | remote "rm -rf $remote_home/app.new && mkdir -p $remote_home/app.new && tar -x -C $remote_home/app.new"
+    remote "bash -s -- $remote_home $sha" < "$root/scripts/stand-remote.sh"
+    echo "stand: готово. Сервис слушает порт на сервере; снаружи он открыт, только если задан TF_VAR_service_cidr"
+}
+
+case "${1:-}" in
+    up)
+        "$tf" init -input=false >/dev/null
+        "$tf" apply
+        # Новый сервер — новый ключ хоста.
+        rm -f "$known"
+        deploy
+        ;;
+    deploy) deploy ;;
+    down)
+        "$tf" destroy
+        rm -rf "$state"
+        ;;
+    *) die "использование: scripts/stand.sh up | deploy | down" ;;
+esac
