@@ -287,7 +287,9 @@ class AgentHandler:
                 request = self._request(state.messages(system), last, remaining)
                 estimate = self._estimator.request(request)
             if estimate <= CALL_TOKENS and state.spent + estimate <= TURN_TOKENS:
-                state.record["history_start"] = state.history_start(state.turn_id)
+                # Наследуется точка первого вызова: отбрасывание ради бюджета хода на поздних
+                # вызовах — дело этого хода, а не всей сессии.
+                state.record.setdefault("history_start", state.history_start(state.turn_id))
                 return request, estimate, self._estimator.raw(request), last
             if state.history_from < len(state.history):
                 self._drop_history(state, system, last, remaining)

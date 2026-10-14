@@ -30,7 +30,7 @@ from assistant.turn.agent import (
     AgentHandler,
     _State,
 )
-from assistant.turn.context import HistoryMessage
+from assistant.turn.context import HistoryMessage, history_start
 from assistant.turn.prefix import PREFIX
 from assistant.turn.tokens import MAX_FACTOR, Estimator, text_tokens
 from tests.conftest import Database
@@ -306,6 +306,48 @@ def test_old_history_is_dropped_first_and_not_retold(database: Database, small: 
     assert record["history_start"] == dropped_on["history_start"]
     # Пересказа нет: дополнительного вызова модели не было.
     assert len(model.requests) == 3
+
+
+def test_late_drop_in_a_turn_does_not_cut_the_session(database: Database) -> None:
+    # Поздний вызов хода отбросил историю ради бюджета хода — следующий ход начинает
+    # историю с той же точки, что и первый вызов этого хода.
+    handler = _handler(database)
+    history = [
+        HistoryMessage("user", "Старый вопрос", (), "t-old"),
+        HistoryMessage("assistant", "Старый ответ", (), "t-old"),
+    ]
+    state = _State("[Сведения]", history, "", "Вопрос", "t-now")
+    assert handler._prepare(state, 0, 30.0) is not None
+    bare = _State("[Сведения]", [], "", "Вопрос", "t-now")
+    # Без истории вызов ровно помещается, с историей — нет.
+    state.spent = TURN_TOKENS - _estimate(handler._request(bare.messages(SYSTEM), True, 30.0))
+    assert handler._prepare(state, 1, 30.0) is not None
+    assert state.history_from == len(history)
+    assert state.record["history_start"] == "t-old"
+
+
+def test_start_of_a_turn_without_messages_is_not_inherited(database: Database, small: Path) -> None:
+    long_answer = "Длинный ответ. " * 2000
+    model = ScriptedModel([final(long_answer), final("коротко")])
+    service, _, _ = _service(database, model)
+    session = new_session()
+    service.turn("u-eng", session, "Первый вопрос")
+    second = service.turn("u-eng", session, "Второй вопрос")
+    start = _record(service, "u-eng", second.body["turn_id"])["history_start"]
+    # Позже — ход без сообщений, который указал точкой самого себя: его точка
+    # не наследуется, следующий ход берёт точку последнего хода с историей.
+    ghost = f"t-ghost-{uuid4().hex[:8]}"
+    with transaction(database.service, "u-eng") as connection:
+        connection.execute(
+            text(
+                "insert into app.turns (turn_id, user_id, session_id, question, outcome,"
+                " answer, model_calls, input_tokens, output_tokens, max_call_input_tokens,"
+                " prefix_hash, latency_ms, record) values (:turn, 'u-eng', :session, 'q',"
+                " 'budget_exceeded', 'a', 1, 0, 0, 0, 'h', 1, cast(:record as jsonb))"
+            ),
+            {"turn": ghost, "session": session, "record": json.dumps({"history_start": ghost})},
+        )
+        assert history_start(connection, "u-eng", session) == start
 
 
 def test_dropped_history_chunks_are_not_citable(database: Database, small: Path) -> None:

@@ -39,9 +39,15 @@ _ACTIONS = text(
 
 _HISTORY_START = text(
     """
-    select record ->> 'history_start' from app.turns
-    where user_id = :user_id and session_id = :session_id and record ? 'history_start'
-    order by created_at desc
+    select t.record ->> 'history_start' from app.turns t
+    where t.user_id = :user_id and t.session_id = :session_id
+      -- Точка — ход, оставивший историю: ход без сообщений точкой быть не может.
+      and exists (
+          select 1 from app.messages m
+          where m.user_id = t.user_id and m.session_id = t.session_id
+            and m.turn_id = t.record ->> 'history_start'
+      )
+    order by t.created_at desc
     limit 1
     """
 )
