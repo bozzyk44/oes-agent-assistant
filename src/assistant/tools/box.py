@@ -33,6 +33,7 @@ from assistant.access import (
 )
 from assistant.actions.draft import prepare_repair
 from assistant.ingest.chunks import TOOL_RESULT_TOKENS
+from assistant.tools.arith import BadExpression, evaluate
 from assistant.tools.kpi import _number, round_half_up, run_kpi
 from assistant.tools.schemas import (
     ARGUMENTS,
@@ -282,7 +283,9 @@ def _calculate(args: CalculateArgs) -> ToolResult:
     numbers = args.numbers
     try:
         match args.operation:
-            case "sum":
+            case "expression":
+                value = evaluate(args.expression or "")
+            case "sum" if numbers:
                 value = sum(numbers, Decimal(0))
             case "difference" if len(numbers) == 2:
                 value = numbers[0] - numbers[1]
@@ -290,10 +293,15 @@ def _calculate(args: CalculateArgs) -> ToolResult:
                 value = numbers[0] / numbers[1]
             case "percent" if len(numbers) == 2:
                 value = numbers[0] * 100 / numbers[1]
+            case "sum":
+                note = "sum: нужно хотя бы одно число"
+                return ToolResult(Status.INVALID, envelope(Status.INVALID, note=note))
             case _:
                 note = f"{args.operation}: нужны ровно два числа"
                 return ToolResult(Status.INVALID, envelope(Status.INVALID, note=note))
         result = _number(round_half_up(value, args.decimals))
+    except BadExpression as error:
+        return ToolResult(Status.INVALID, envelope(Status.INVALID, note=f"expression: {error}"))
     except ZeroDivisionError:
         return ToolResult(Status.INVALID, envelope(Status.INVALID, note="деление на ноль"))
     except ArithmeticError:

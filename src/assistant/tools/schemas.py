@@ -73,8 +73,9 @@ class KpiArgs(_Args):
 
 
 class CalculateArgs(_Args):
-    operation: Literal["percent", "ratio", "difference", "sum"]
-    numbers: list[Decimal] = Field(min_length=1, max_length=50)
+    operation: Literal["percent", "ratio", "difference", "sum", "expression"]
+    numbers: list[Decimal] = Field(default_factory=list, max_length=50)
+    expression: str | None = Field(default=None, max_length=300)
     decimals: int = Field(default=1, ge=0, le=6)
 
 
@@ -194,18 +195,23 @@ TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
         CALCULATE,
         "Арифметика над числами из результатов инструментов. percent: первое от второго в"
         " процентах; ratio: первое к второму; difference: первое минус второе; sum: сумма"
-        " всех. Округление половина вверх до decimals знаков.",
+        " всех; expression: выражение из чисел, + - * / и скобок в поле expression, например"
+        " доля факта от плана на период. Округление половина вверх до decimals знаков.",
         {
             "type": "object",
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["percent", "ratio", "difference", "sum"],
+                    "enum": ["percent", "ratio", "difference", "sum", "expression"],
                 },
                 "numbers": {"type": "array", "items": {"type": "number"}},
+                "expression": {
+                    "type": "string",
+                    "description": "Для expression: только числа, + - * / и скобки",
+                },
                 "decimals": {"type": "integer"},
             },
-            "required": ["operation", "numbers"],
+            "required": ["operation"],
             "additionalProperties": False,
         },
     ),

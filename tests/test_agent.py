@@ -488,6 +488,22 @@ def test_calculate(
     assert result["data"]["result"] == expected
 
 
+def test_calculate_expression(database: Database, small: Path) -> None:
+    # Доля факта от плана на период одним вызовом: факт / (план на смену × смены) × 100.
+    result = _tool(
+        database,
+        "u-eng",
+        CALCULATE,
+        operation="expression",
+        expression="61777 / (2 290 × 28) * 100",
+        decimals=1,
+    )
+    assert result["data"]["result"] == "96.3"
+    bad = _tool(database, "u-eng", CALCULATE, operation="expression", expression="__import__('os')")
+    assert bad["status"] == "invalid"
+    assert _tool(database, "u-eng", CALCULATE, operation="sum", numbers=[])["status"] == "invalid"
+
+
 def test_calculate_refuses_bad_input(database: Database, small: Path) -> None:
     assert (
         _tool(database, "u-eng", CALCULATE, operation="ratio", numbers=[1, 0])["status"]
