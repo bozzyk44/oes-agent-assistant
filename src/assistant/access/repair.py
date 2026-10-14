@@ -12,8 +12,10 @@ from assistant.access.status import Status
 @dataclass(frozen=True)
 class RepairCheck:
     status: Status
-    # Участок — только при `ok`: отказ не сообщает, где стоит оборудование.
+    # Участок и написание из набора — только при `ok`: отказ не сообщает, где стоит
+    # оборудование. В параметры заявки идёт это написание, а не написание модели.
     site: str | None = None
+    equipment_id: str | None = None
 
 
 def check_repair(connection: Connection, grants: Grants, equipment_id: str) -> RepairCheck:
@@ -22,9 +24,9 @@ def check_repair(connection: Connection, grants: Grants, equipment_id: str) -> R
     Участок берётся из базы, а не из слов модели. Не совпал с полномочием — `denied`,
     и действие не создаётся.
     """
-    site = locate(connection, [equipment_id])[equipment_id].site
-    if site is None:
+    found = locate(connection, [equipment_id])[equipment_id]
+    if found.site is None:
         return RepairCheck(Status.NOT_FOUND)
-    if site not in grants.repair_sites:
+    if found.site not in grants.repair_sites:
         return RepairCheck(Status.DENIED)
-    return RepairCheck(Status.OK, site)
+    return RepairCheck(Status.OK, found.site, found.equipment_id)

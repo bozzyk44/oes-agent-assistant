@@ -15,8 +15,8 @@ SEARCH = "search_documents"
 DOCUMENT = "get_document"
 KPI = "query_kpi"
 REPAIR = "create_repair_request"
-# Инструменты, которые приносят данные набора; расчёт к ним не относится.
-DATA_TOOLS = frozenset({SEARCH, DOCUMENT, KPI})
+# Инструменты прямого запроса: их ответ говорит о самих данных, а не о похожих фрагментах.
+DIRECT_TOOLS = frozenset({DOCUMENT, KPI})
 # Исходы, которые модели позволено предложить.
 PROPOSABLE = frozenset({"answer", "refusal", "no_data"})
 
@@ -70,9 +70,12 @@ def resolve_outcome(
     if refusal_signal:
         return Verdict("refusal" if proposed in ("refusal", "no_data") else "answer", 4)
     if proposed == "refusal":
-        # `not_found` — тоже законное «данных нет»: такого документа или оборудования нет.
-        reached = any(
-            call.tool in DATA_TOOLS and call.status in (Status.OK, Status.EMPTY, Status.NOT_FOUND)
+        # Данные получены или законно отсутствуют: принятая цитата либо прямой запрос —
+        # КХД или документ по идентификатору — с ответом `ok`, `empty` или `not_found`.
+        # Поиск без цитаты не в счёт: через «или» он почти всегда что-то возвращает,
+        # и обоснованный отказ модели иначе становился бы `no_data`.
+        reached = cited or any(
+            call.tool in DIRECT_TOOLS and call.status in (Status.OK, Status.EMPTY, Status.NOT_FOUND)
             for call in calls
         )
         return Verdict("no_data" if reached else "refusal", 5)

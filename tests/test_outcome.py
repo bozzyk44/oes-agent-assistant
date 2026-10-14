@@ -89,12 +89,29 @@ def test_row_4_refusal_signal_with_used_data(
         ([ToolStatus(SEARCH, Status.INVALID)], "refusal"),
         ([ToolStatus(KPI, Status.NOT_FOUND)], "no_data"),
         ([ToolStatus(KPI, Status.EMPTY)], "no_data"),
-        ([ToolStatus(SEARCH, Status.OK)], "no_data"),
+        ([ToolStatus(SEARCH, Status.OK)], "refusal"),
+        ([ToolStatus(SEARCH, Status.EMPTY)], "refusal"),
+        ([ToolStatus(DOCUMENT, Status.NOT_FOUND)], "no_data"),
+        ([ToolStatus(DOCUMENT, Status.OK)], "no_data"),
     ],
-    ids=["без инструментов", "расчёт", "неверные аргументы", "не найдено", "пусто", "поиск"],
+    ids=[
+        "без инструментов",
+        "расчёт",
+        "неверные аргументы",
+        "не найдено",
+        "пусто",
+        "поиск без цитаты",
+        "пустой поиск",
+        "нет документа",
+        "документ",
+    ],
 )
 def test_row_5_model_refusal_without_signal(calls: list[ToolStatus], expected: str) -> None:
     assert _resolve(calls, "refusal") == (expected, 5)
+
+
+def test_row_5_search_with_accepted_citation_reached_data() -> None:
+    assert _resolve([ToolStatus(SEARCH, Status.OK)], "refusal", cited=True) == ("no_data", 5)
 
 
 @pytest.mark.parametrize("cited", [False, True])

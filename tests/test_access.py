@@ -18,6 +18,7 @@ from assistant.access import (
     Filter,
     Grants,
     KpiQuery,
+    KpiResult,
     Status,
     check_repair,
     get_document,
@@ -124,7 +125,7 @@ def test_repair_request(connect: Barrier) -> None:
         foreign = check_repair(connection, grants, "EX-2")
     assert (ok.status, ok.site) == (Status.OK, "K1")
     # Отказ не сообщает, на каком участке оборудование.
-    assert (foreign.status, foreign.site) == (Status.DENIED, None)
+    assert (foreign.status, foreign.site, foreign.equipment_id) == (Status.DENIED, None, None)
     for user in ("u-fin", "u-hr"):
         with _open(connect, user) as (connection, grants):
             assert check_repair(connection, grants, "EX-1").status is Status.DENIED
@@ -163,6 +164,22 @@ def test_status_denied(connect: Barrier) -> None:
             connection, grants, KpiQuery("production")
         ).status
     assert set(cases.values()) == {Status.DENIED}, cases
+
+
+def test_denied_carries_no_content(connect: Barrier) -> None:
+    # Отказ во всём названном — без строк и без перечня отказанного, даже если среди
+    # названного было и неизвестное оборудование.
+    with _open(connect, "u-k1") as (connection, grants):
+        sites = query_rows(
+            connection, grants, KpiQuery("production", (Filter("site", "in", ["K2"]),))
+        )
+        equipment = query_rows(
+            connection,
+            grants,
+            KpiQuery("downtime", (Filter("equipment_id", "in", ["EX-2", "EX-9"]),)),
+        )
+    assert sites == KpiResult(Status.DENIED)
+    assert equipment == KpiResult(Status.DENIED)
 
 
 def test_status_not_found(connect: Barrier) -> None:
@@ -326,6 +343,8 @@ def test_equipment_is_matched_regardless_of_spelling(
     # Чужое оборудование, написанное кириллицей, — отказ, а не «такого нет».
     assert denied.status is Status.DENIED
     assert (repair_own.status, repair_foreign.status) == (Status.OK, Status.DENIED)
+    # В заявку пойдёт написание из набора, а не написание модели.
+    assert (repair_own.equipment_id, repair_foreign.equipment_id) == ("EX-1", None)
 
 
 def test_kpi_comparisons_narrow_within_grants(connect: Barrier) -> None:
