@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from evalrun.__main__ import main
+from evalrun.__main__ import main, run
 from evalrun.api import Service, Toir, Transport
 from evalrun.checks import Check, check, leaked, passed
 from evalrun.compare import NotComparable, compare
@@ -509,3 +509,54 @@ def test_recorded_real_model_turns_replay_in_ci(database: Any, tmp_path: Path) -
         line = got[(turn["question"]["id"], turn["attempt"])]
         assert line["response"]["outcome"] == turn["outcome"], turn["question"]["id"]
         assert line["passed"] == turn["passed"], (turn["question"]["id"], line["checks"])
+
+
+def _fake(info: Any, requests: tuple[int, Any], calls: list[str]) -> Transport:
+    def send(method: str, url: str, headers: dict[str, str], body: Any) -> tuple[int, Any]:
+        calls.append(url.rsplit("/", 1)[-1])
+        if url.endswith("/info"):
+            return (200, info) if info else (0, {"error": "URLError"})
+        if url.endswith("/requests"):
+            return requests
+        return 0, {"error": "URLError"}
+
+    return send
+
+
+@pytest.mark.parametrize(
+    ("info", "requests", "problem"),
+    [
+        (None, (200, []), "GET /info"),
+        ({"prefix_hash": "h"}, (401, {"detail": "нет"}), "GET /requests"),
+    ],
+)
+def test_run_stops_before_the_first_model_call(
+    tmp_path: Path, info: Any, requests: tuple[int, Any], problem: str, capsys: Any
+) -> None:
+    questions = _questions_file(tmp_path)
+    out = tmp_path / "eval"
+    out.mkdir()
+    calls: list[str] = []
+    env = {"QUESTIONS": str(questions), "DATA_DIR": str(tmp_path), "EVAL_DIR": str(out)}
+    assert run(env, _fake(info, requests, calls)) == 1
+    assert "turn" not in calls
+    assert problem in capsys.readouterr().err
+    assert not (out / "results.jsonl").exists()
+
+
+def test_run_where_the_service_never_answered_keeps_the_old_result(
+    tmp_path: Path, capsys: Any
+) -> None:
+    questions = _questions_file(tmp_path)
+    out = tmp_path / "eval"
+    out.mkdir()
+    (out / "results.jsonl").write_text("прежний итог\n", encoding="utf-8")
+    env = {
+        "QUESTIONS": str(questions),
+        "DATA_DIR": str(tmp_path),
+        "EVAL_DIR": str(out),
+        "EVAL_ATTEMPTS": "1",
+    }
+    assert run(env, _fake({"prefix_hash": "h"}, (200, []), [])) == 1
+    assert (out / "results.jsonl").read_text(encoding="utf-8") == "прежний итог\n"
+    assert "итог не обновлён" in capsys.readouterr().err

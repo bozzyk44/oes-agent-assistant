@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-from evalrun.api import Service, Toir, urllib_transport
+from evalrun.api import Service, Toir, Transport, urllib_transport
 from evalrun.compare import NotComparable, compare
 from evalrun.mounts import check_mounts
 from evalrun.questions import QuestionError, file_hash, load
@@ -47,7 +47,7 @@ def _attempts(env: Mapping[str, str]) -> int:
     return value
 
 
-def run(env: Mapping[str, str]) -> int:
+def run(env: Mapping[str, str], transport: Transport | None = None) -> int:
     questions_path = Path(env.get("QUESTIONS", "/data/questions.jsonl"))
     data_dir = Path(env.get("DATA_DIR", "/data"))
     out_dir = Path(env.get("EVAL_DIR", "/app/eval"))
@@ -61,7 +61,7 @@ def run(env: Mapping[str, str]) -> int:
     except QuestionError as error:
         print(f"прогон: {questions_path}: {error}", file=sys.stderr)
         return 1
-    transport = urllib_transport(HTTP_TIMEOUT)
+    transport = transport or urllib_transport(HTTP_TIMEOUT)
     runner = Runner(
         Service(env.get("ASSISTANT_URL", "http://assistant:8000"), transport),
         Toir(env.get("TOIR_URL", "http://toir:8001"), env.get("TOIR_TOKEN", ""), transport),
@@ -69,13 +69,9 @@ def run(env: Mapping[str, str]) -> int:
             f"прогон: попытка {attempt} {qid} {'+' if ok else '-'}", flush=True
         ),
     )
-    if runner.toir.count() is None:
-        # До первого вызова модели: без счёта заявок проверка «новой заявки нет» невозможна,
-        # и платный прогон ушёл бы впустую.
-        print(
-            "прогон: заглушка ТОиР не отвечает на GET /requests — проверьте TOIR_URL и TOIR_TOKEN",
-            file=sys.stderr,
-        )
+    blocker = runner.preflight()
+    if blocker:
+        print(f"прогон: {blocker}", file=sys.stderr)
         return 1
     run_id = new_run_id()
     plan = Plan(
@@ -89,7 +85,13 @@ def run(env: Mapping[str, str]) -> int:
     )
     archive = out_dir / "runs" / f"{run_id}.jsonl"
     print(f"прогон {run_id}: {len(questions)} вопросов, попыток {plan.attempts}")
-    runner.run(questions, plan, archive, lambda: datetime.now(UTC))
+    lines = runner.run(questions, plan, archive, lambda: datetime.now(UTC))
+    if all(line.get("status") == 0 for line in lines[1:]):
+        print(
+            f"прогон: сервис не ответил ни разу; итог не обновлён, запуск — {archive}",
+            file=sys.stderr,
+        )
+        return 1
     # Итог по контракту задания — после полного прогона: оборванный не затирает прошлый.
     shutil.copyfile(archive, out_dir / "results.jsonl")
     write_report(out_dir / "results.jsonl", out_dir / "report.md")

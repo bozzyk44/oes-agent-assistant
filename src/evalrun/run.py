@@ -76,6 +76,16 @@ class Runner:
     monotonic: Callable[[], float] = time.monotonic
     progress: Callable[[int, str, bool], None] = lambda *_: None
 
+    def preflight(self) -> str | None:
+        """До первого вызова модели: сервис отвечает, а заглушка ТОиР отдаёт заявки.
+        Без счёта заявок проверка «новой заявки нет» невозможна, а без сервиса прогон
+        из одних провалов затёр бы прошлый итог."""
+        if not self.service.info().get("prefix_hash"):
+            return "сервис не отвечает на GET /info — он запущен? (make run)"
+        if self.toir.count() is None:
+            return "заглушка ТОиР не отвечает на GET /requests — проверьте TOIR_URL и TOIR_TOKEN"
+        return None
+
     def ask(self, question: Question, session: str) -> tuple[int, Any, int]:
         retries = 0
         while True:
