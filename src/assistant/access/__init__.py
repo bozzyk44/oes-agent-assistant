@@ -14,7 +14,14 @@ from assistant.access.documents import (
     search,
 )
 from assistant.access.grants import Grants, load_grants
-from assistant.access.kpi import Filter, KpiQuery, KpiResult, query_rows
+from assistant.access.kpi import (
+    Filter,
+    KpiQuery,
+    KpiResult,
+    Period,
+    data_periods,
+    query_rows,
+)
 from assistant.access.repair import RepairCheck, check_repair
 from assistant.access.status import Status
 
@@ -25,10 +32,12 @@ __all__ = [
     "Grants",
     "KpiQuery",
     "KpiResult",
+    "Period",
     "RepairCheck",
     "SearchResult",
     "Status",
     "check_repair",
+    "data_periods",
     "get_document",
     "load_grants",
     "query_rows",

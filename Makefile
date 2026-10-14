@@ -9,6 +9,8 @@ COMPOSE_TEST := docker compose -p $(COMPOSE_PROJECT)-test -f compose.test.yaml
 COMPOSE_SMOKE := docker compose -p $(COMPOSE_PROJECT)-smoke
 # Файлы, которые контейнер пишет в каталоги хоста, принадлежат тому, кто запустил make.
 HOST_USER := $(shell id -u):$(shell id -g)
+# Коммит для GET /info; вне рабочей копии git — пусто.
+export GIT_COMMIT ?= $(shell git describe --always --dirty 2>/dev/null)
 
 .PHONY: help env data data-holdout run migrate migrate-check down reset test eval smoke ci lock
 

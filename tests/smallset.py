@@ -42,8 +42,10 @@ USERS = [
 DOCS = {
     "A1": ["all"],
     "H1": ["hr"],
-    "R1": ["engineering", "site-k1"],
-    "R2": ["engineering", "site-k1"],
+    # Редакции открыты по-разному: кадровику видна только прежняя, финансисту — только
+    # действующая.
+    "R1": ["engineering", "site-k1", "hr"],
+    "R2": ["engineering", "site-k1", "finance"],
 }
 
 PRODUCTION = [

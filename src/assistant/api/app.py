@@ -35,6 +35,8 @@ from assistant.api.schemas import (
 from assistant.config import Settings, ToirSecret, load_settings, load_toir_secret
 from assistant.db.migrate import head_revision
 from assistant.db.session import service_engine, transaction
+from assistant.model.openai_client import OpenAICompatibleClient
+from assistant.turn.agent import AgentHandler
 from assistant.turn.runner import (
     INTERNAL_ERROR,
     NotReadyHandler,
@@ -52,6 +54,12 @@ class TurnNotStarted(Exception):
 
 
 _USER_EXISTS = text("select 1 from app.users where user_id = :user_id")
+_TURN_RECORD = text(
+    "select turn_id, session_id, question, outcome, answer, citations, model_calls,"
+    " input_tokens, cached_input_tokens, output_tokens, max_call_input_tokens, prefix_hash,"
+    " latency_ms, record, created_at from app.turns where turn_id = :turn_id"
+)
+_DATASET = text("select content_hash from app.dataset_version")
 _READY = text(
     "select (select version_num from public.alembic_version),"
     " (select count(*) from app.dataset_version)"
@@ -75,7 +83,23 @@ def create_app() -> FastAPI:
     settings = load_settings(os.environ)
     secret = load_toir_secret(os.environ)
     engine = service_engine(settings.database_url)
-    return build_app(default_runtime(settings, engine, NotReadyHandler(settings)), secret)
+    return build_app(default_runtime(settings, engine, make_handler(settings, engine)), secret)
+
+
+def make_handler(settings: Settings, engine: Engine) -> TurnHandler:
+    """Без адреса и имени модели сервис стартует, а ход честно отвечает `error`."""
+    if not settings.model.configured:
+        return NotReadyHandler(settings)
+    model = settings.model
+    client = OpenAICompatibleClient(
+        model.base_url,
+        model.api_key,
+        model.name,
+        max_output_tokens=model.max_output_tokens,
+        timeout=model.timeout_seconds,
+        extra_body=model.extra_body,
+    )
+    return AgentHandler(engine, client, model)
 
 
 def build_app(
@@ -171,6 +195,44 @@ def build_app(
         if not datasets:
             return JSONResponse(status_code=503, content={"status": "набор не загружен"})
         return JSONResponse(content={"status": "ok"})
+
+    @app.get("/turns/{turn_id}")
+    def turn_record(turn_id: str, user_id: user) -> JSONResponse:
+        """Запись хода для диагностики — только автору: чужой ход неотличим от несуществующего.
+
+        В записи — то, что видела модель от имени автора, и ничего, что не прошло его права.
+        """
+        with transaction(engine, user_id) as connection:
+            row = connection.execute(_TURN_RECORD, {"turn_id": turn_id}).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="нет такого хода")
+        body = dict(row._mapping)
+        body["created_at"] = body["created_at"].isoformat()
+        return JSONResponse(content=body)
+
+    @app.get("/info")
+    def info() -> JSONResponse:
+        """Сведения о сборке для прогона: на чём проверялось."""
+        try:
+            with engine.connect() as connection:
+                dataset = connection.scalar(_DATASET)
+        except Exception:
+            log.exception("сведения о сборке: база недоступна")
+            dataset = None
+        model = runtime.settings.model
+        return JSONResponse(
+            content={
+                "commit": os.environ.get("GIT_COMMIT", ""),
+                "dataset_hash": dataset,
+                "prefix_hash": runtime.handler.prefix_hash,
+                "model": model.name,
+                "sampling": {
+                    "temperature": 0,
+                    "max_output_tokens": model.max_output_tokens,
+                    "response_format": model.response_format,
+                },
+            }
+        )
 
     @app.post("/turn")
     def turn(body: TurnRequest, user_id: Annotated[str, Depends(turn_user)]) -> TurnResponse:

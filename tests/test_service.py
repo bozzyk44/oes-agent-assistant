@@ -564,7 +564,8 @@ def test_handler_can_be_replaced_without_touching_the_frame(service: Service) ->
 def test_data_transactions_are_opened_only_through_the_bound_helper() -> None:
     # Правило «транзакция с данными — только с привязкой к пользователю» держит не база
     # (у app.actions построчной защиты нет), а то, что в коде сервиса нет другого способа
-    # открыть транзакцию. Единственное исключение — проверка готовности, без данных.
+    # открыть транзакцию. Исключения — проверка готовности и сведения о сборке: обе читают
+    # только служебные записи без данных пользователя — версию схемы и хэш набора.
     source = Path(__file__).resolve().parents[1] / "src" / "assistant"
     found = []
     for path in sorted(source.rglob("*.py")):
@@ -574,4 +575,4 @@ def test_data_transactions_are_opened_only_through_the_bound_helper() -> None:
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if ".begin(" in line or ".connect(" in line:
                 found.append(f"{relative}:{number}")
-    assert len(found) == 1 and found[0].startswith("api/app.py:"), found
+    assert len(found) == 2 and all(item.startswith("api/app.py:") for item in found), found

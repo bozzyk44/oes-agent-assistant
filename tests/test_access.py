@@ -370,6 +370,20 @@ def test_search_shows_superseded_only_on_request(connect: Barrier) -> None:
     assert _docs(current.chunks) == {"R2"}
     assert _docs(history.chunks) == {"R1", "R2"}
     assert {chunk.superseded_by for chunk in history.chunks if chunk.doc_id == "R1"} == {"R2"}
+    assert {chunk.supersedes for chunk in current.chunks} == {"R1"}
+
+
+def test_closed_other_edition_is_not_revealed(connect: Barrier) -> None:
+    # Другая редакция закрыта: ссылка на неё не выдаёт, что она есть.
+    with _open(connect, "u-fin") as (connection, grants):
+        found = search(connection, grants, "периодичность ремонта")
+        document = get_document(connection, grants, "R2")
+    assert _docs(found.chunks) == {"R2"}
+    assert {chunk.supersedes for chunk in found.chunks + document.chunks} == {None}
+    with _open(connect, "u-hr") as (connection, grants):
+        old = search(connection, grants, "периодичность ремонта", include_superseded=True)
+    assert _docs(old.chunks) == {"R1"}
+    assert {chunk.superseded_by for chunk in old.chunks} == {None}
 
 
 def test_search_finds_identifiers_exactly(connect: Barrier) -> None:
