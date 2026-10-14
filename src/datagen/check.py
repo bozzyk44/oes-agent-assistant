@@ -13,6 +13,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from datagen.questions import (
+    ACTION_TOOL,
+    CASES,
+    DOUBLE_CASES,
+    accessible_text,
+    build_questions,
+)
 from datagen.render import (
     DOWNTIME_HEADER,
     EQUIPMENT_HEADER,
@@ -37,6 +44,11 @@ from datagen.world import (
     World,
 )
 
+MIN_QUESTIONS = 14
+MIN_SESSIONS = 2
+MIN_FORMULATIONS = 2
+OUTCOMES = ("answer", "refusal", "no_data", "action", "budget_exceeded", "error")
+QUESTION_FILES = ("questions.jsonl", "questions.variants.jsonl")
 MIN_USERS = 4
 MIN_EXCAVATORS = 7
 MIN_TRUCKS = 12
@@ -75,6 +87,10 @@ def check_dataset(root: Path) -> list[str]:
     period = _check_production(root, problems)
     _check_downtime(root, equipment, period, problems)
     _check_docs(root, problems)
+    if not problems:
+        for name in QUESTION_FILES:
+            if (root / name).exists():
+                _check_questions(root, name, problems)
     return problems
 
 
@@ -117,7 +133,133 @@ def check_traps(root: Path, world: World) -> list[str]:
 
     _check_anomaly(root, world, problems)
     _check_ppr_downtime(root, world, problems)
+    _check_question_set(root, world, problems)
     return problems
+
+
+def _files(root: Path) -> dict[str, str]:
+    """Файлы набора, из которых данные попадают в контекст модели."""
+    paths = [*sorted((root / "docs").glob("*.md")), root / "users.json"]
+    paths += [root / f"{table}.csv" for table in KPI_TABLES]
+    return {path.relative_to(root).as_posix(): path.read_text(encoding="utf-8") for path in paths}
+
+
+def _read_questions(root: Path, name: str, problems: list[str]) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for number, line in enumerate((root / name).read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            problems.append(f"{name}:{number}: не JSON")
+            continue
+        if not isinstance(record, dict):
+            problems.append(f"{name}:{number}: не объект")
+            continue
+        records.append(record)
+    return records
+
+
+def _strings(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _check_questions(root: Path, name: str, problems: list[str]) -> None:
+    """Формат вопросов и главное правило: строка `forbidden` не встречается в данных,
+    доступных автору вопроса, — иначе прогон покажет ложную утечку.
+    """
+    files = _files(root)
+    users = {user["user_id"]: user for user in json.loads(files["users.json"])}
+    docs = {path.removeprefix("docs/").removesuffix(".md") for path in files if "/" in path}
+    seen: set[str] = set()
+    texts: dict[str, str] = {}
+    for record in _read_questions(root, name, problems):
+        qid = record.get("id")
+        where = f"{name}: {qid}"
+        if not isinstance(qid, str) or not qid or qid in seen:
+            problems.append(f"{name}: пустой или повторный id {qid!r}")
+            continue
+        seen.add(qid)
+        user = record.get("user")
+        if not isinstance(user, str) or user not in users:
+            problems.append(f"{where}: нет пользователя {user!r}")
+            continue
+        if not isinstance(record.get("question"), str) or not record["question"]:
+            problems.append(f"{where}: нет текста вопроса")
+        expect = record.get("expect")
+        if expect not in OUTCOMES:
+            problems.append(f"{where}: expect {expect!r} не из списка outcome")
+        for key in ("must_include", "must_cite", "forbidden"):
+            if not _strings(record.get(key, [])):
+                problems.append(f"{where}: {key} — не список строк")
+        session = record.get("session")
+        if session is not None and not isinstance(session, str):
+            problems.append(f"{where}: session — не строка")
+        action = record.get("action")
+        if expect == "action" and (
+            not isinstance(action, dict)
+            or action.get("tool") != ACTION_TOOL
+            or not isinstance(action.get("params"), dict)
+        ):
+            problems.append(f"{where}: для expect action нет action с tool и params")
+        cited = record.get("must_cite")
+        for doc_id in cited if isinstance(cited, list) else []:
+            if doc_id not in docs:
+                problems.append(f"{where}: в must_cite нет документа {doc_id}")
+        text = texts.get(user)
+        if text is None:
+            text = texts[user] = accessible_text(files, users[user])
+        forbidden = record.get("forbidden")
+        for value in forbidden if isinstance(forbidden, list) else []:
+            if isinstance(value, str) and normalize(value) in text:
+                problems.append(
+                    f"{where}: строка forbidden «{value}» есть в данных, доступных автору"
+                )
+
+
+def _check_question_set(root: Path, world: World, problems: list[str]) -> None:
+    """Состав вопросов своего набора: число, сессии, случаи задания, формулировки и разметка."""
+    expected = build_questions(world, _files(root))
+    main = _read_questions(root, "questions.jsonl", problems)
+    if len(main) < MIN_QUESTIONS:
+        problems.append(f"questions.jsonl: вопросов {len(main)}, нужно не меньше {MIN_QUESTIONS}")
+    if [record.get("id") for record in main] != [question.qid for question in expected]:
+        problems.append("questions.jsonl: вопросы не совпадают с выходом генератора")
+    sessions: dict[object, int] = {}
+    for record in main:
+        if record.get("session") is not None:
+            sessions[record["session"]] = sessions.get(record["session"], 0) + 1
+    if sum(1 for count in sessions.values() if count >= 2) < MIN_SESSIONS:
+        problems.append(f"questions.jsonl: сессий из двух вопросов и больше меньше {MIN_SESSIONS}")
+    cases = [question.case for question in expected]
+    for case in CASES:
+        need = 2 if case in DOUBLE_CASES else 1
+        if cases.count(case) < need:
+            problems.append(f"вопросы: случай {case} покрыт меньше {need} раз")
+    users = {user.user_id: user for user in world.users}
+    sites = {item.equipment_id: item.site for item in world.equipment}
+    docs = {doc.doc_id: doc for doc in world.docs.values()}
+    for question in expected:
+        user = users[question.user]
+        if len(question.formulations) < MIN_FORMULATIONS:
+            problems.append(f"вопросы: у {question.qid} меньше {MIN_FORMULATIONS} формулировок")
+        groups = {"all", *user.groups}
+        for doc_id in question.must_cite:
+            if not set(docs[doc_id].acl) & groups:
+                problems.append(f"вопросы: {question.qid} цитирует недоступный автору {doc_id}")
+        if question.action is not None:
+            equipment = question.action["params"]["equipment_id"]
+            if sites.get(equipment) not in user.repair_requests:
+                problems.append(f"вопросы: {question.qid} — заявка вне прав автора")
+        for label in question.labels:
+            body = (root / "docs" / f"{label.doc_id}.md").read_text(encoding="utf-8")
+            if f"\n## {label.section}. " not in body:
+                problems.append(f"вопросы: у {question.qid} разметка на несуществующий раздел")
+    variants = _read_questions(root, "questions.variants.jsonl", problems)
+    count = sum(len(question.formulations) for question in expected)
+    if len(variants) != count:
+        problems.append("questions.variants.jsonl: число формулировок не то")
 
 
 def read_docs(root: Path, problems: list[str]) -> list[DocFile]:

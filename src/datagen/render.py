@@ -1,4 +1,12 @@
-"""Файлы набора по параметрам: документы из шаблонов, пользователи и три таблицы КХД."""
+"""Файлы набора по параметрам: документы из шаблонов, пользователи, три таблицы КХД
+и эталонные вопросы.
+
+Вопросы — три файла рядом с набором. `questions.jsonl` — формат задания, по одной
+формулировке на вопрос. `questions.variants.jsonl` — тот же формат, все формулировки:
+идентификатор `<вопрос>.<номер>`, сессии — свои на каждый номер. `questions.labels.json` —
+разметка фрагментов с ответом: `<документ>#<раздел>` по каждому вопросу; формат
+`questions.jsonl` она не меняет.
+"""
 
 import calendar
 import json
@@ -6,6 +14,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from string import Template
 
+from datagen.questions import Question, build_questions
 from datagen.text import fmt_int, fmt_tenths
 from datagen.world import BUDGET_ITEMS, SITE_NAMES, SITES, Doc, World
 
@@ -44,7 +53,33 @@ def render(world: World) -> dict[str, str]:
             for item in world.equipment
         ),
     )
+    questions = build_questions(world, files)
+    files.update(_questions(questions))
     return files
+
+
+def _questions(questions: tuple[Question, ...]) -> dict[str, str]:
+    def dump(record: object) -> str:
+        return json.dumps(record, ensure_ascii=False)
+
+    main = [dump(question.record()) for question in questions]
+    variants = [
+        dump(question.record(number, qid=f"{question.qid}.{number + 1}"))
+        for question in questions
+        for number in range(len(question.formulations))
+    ]
+    labels = {
+        question.qid: [
+            {"doc_id": label.doc_id, "chunk_prefix": f"{label.doc_id}#{label.section}"}
+            for label in question.labels
+        ]
+        for question in questions
+    }
+    return {
+        "questions.jsonl": "\n".join(main) + "\n",
+        "questions.variants.jsonl": "\n".join(variants) + "\n",
+        "questions.labels.json": json.dumps(labels, ensure_ascii=False, indent=2) + "\n",
+    }
 
 
 def write_dataset(world: World, out: Path) -> None:
