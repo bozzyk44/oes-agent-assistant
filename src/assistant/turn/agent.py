@@ -5,8 +5,11 @@
 временной ошибки, считается в лимит. Отказ сервера из-за параметра формата лимит не тратит:
 сервер отверг параметр до запуска модели.
 
-Токены, обрезка результата инструмента и проверка бюджета перед отправкой — отдельный
-слой (бюджет хода); здесь — лимит числа вызовов и порядок шагов.
+Бюджет проверяется до отправки: вход собирается заново перед каждым вызовом и
+оценивается локально. Не помещается — изменяемая часть отбрасывается в фиксированном
+порядке, без пересказа: сначала старые ходы сессии, потом ранние результаты инструментов
+этого хода. Не помогло — вызов не отправляется. В потраченное идут фактические числа
+провайдера, а где их нет — оценка.
 """
 
 import json
@@ -20,6 +23,7 @@ from assistant.access import Status, data_periods, load_grants
 from assistant.actions.draft import TOOL as REPAIR_TOOL
 from assistant.config import ModelSettings
 from assistant.db.session import transaction
+from assistant.ingest.chunks import TOOL_RESULT_TOKENS
 from assistant.model import (
     ChatRequest,
     FormatRejected,
@@ -30,7 +34,13 @@ from assistant.model import (
 )
 from assistant.tools.box import ToolBox, ToolResult, envelope
 from assistant.turn.calls import NOT_EXECUTED, plan_calls
-from assistant.turn.context import actions_block, build_messages, load_history, user_info
+from assistant.turn.context import (
+    HistoryMessage,
+    actions_block,
+    build_messages,
+    load_history,
+    user_info,
+)
 from assistant.turn.outcome import ToolStatus, resolve_outcome
 from assistant.turn.parse import parse_final, strip_thinking
 from assistant.turn.prefix import PREFIX, Prefix, canonical
@@ -41,6 +51,7 @@ from assistant.turn.runner import (
     TurnResult,
     draft_result,
 )
+from assistant.turn.tokens import Estimator, load_factor, save_factor
 
 log = logging.getLogger(__name__)
 
@@ -62,20 +73,69 @@ ANSWER_SCHEMA: dict[str, Any] = {
         },
     },
 }
+# Лимиты входа из задания, токены: на один вызов и на все вызовы хода.
+CALL_TOKENS = 8000
+TURN_TOKENS = 24000
+DROPPED = json.dumps(
+    {"note": "Результат убран из входа ради бюджета хода; при необходимости запросите заново."},
+    ensure_ascii=False,
+)
 REPEATED = "Результат этого вызова с теми же аргументами уже есть выше; повтор не выполнен."
 EMPTY_ANSWER = "Не удалось получить ответ модели."
-BUDGET_ANSWER = "Ход остановлен на лимите вызовов модели, ответа нет."
+BUDGET_ANSWER = "Ход остановлен на лимите бюджета модели, ответа нет."
 
 
 @dataclass
 class _State:
-    """То, что накапливает ход: вход, статусы, фрагменты во входе, запись."""
+    """То, что накапливает ход: части входа, статусы, фрагменты, потраченное, запись."""
 
-    messages: list[dict[str, Any]]
-    seen_chunks: set[str]
+    info: str
+    history: list[HistoryMessage]
+    actions: str
+    question: str
+    # Сообщения этого хода: ответы модели с вызовами и результаты инструментов.
+    turn: list[dict[str, Any]] = field(default_factory=list)
+    turn_chunks: set[str] = field(default_factory=set)
+    # Сколько первых сообщений истории отброшено ради бюджета.
+    history_from: int = 0
+    # Входные токены уже отправленных вызовов: факт провайдера, иначе оценка.
+    spent: int = 0
+    last_reply: ModelReply | None = None
     statuses: list[ToolStatus] = field(default_factory=list)
     calls: dict[str, ToolResult] = field(default_factory=dict)
     record: dict[str, Any] = field(default_factory=lambda: {"calls": []})
+
+    def messages(self, system: dict[str, Any]) -> list[dict[str, Any]]:
+        history = self.history[self.history_from :]
+        return [
+            system,
+            *build_messages(self.info, history, self.actions, self.question),
+            *self.turn,
+        ]
+
+    def seen_chunks(self) -> set[str]:
+        """Фрагменты, бывшие во входе: результаты этого хода и вошедшая история."""
+        history = self.history[self.history_from :]
+        return self.turn_chunks | {chunk for item in history for chunk in item.chunk_ids}
+
+    def drop_one(self) -> bool:
+        """Отбрасывает следующую часть по порядку; `False` — отбрасывать нечего."""
+        if self.history_from < len(self.history):
+            # Ход истории — вопрос и всё до следующего вопроса.
+            self.history_from += 1
+            while (
+                self.history_from < len(self.history)
+                and self.history[self.history_from].role != "user"
+            ):
+                self.history_from += 1
+            self.record["dropped_history"] = self.history_from
+            return True
+        for message in self.turn:
+            if message["role"] == "tool" and message["content"] != DROPPED:
+                message["content"] = DROPPED
+                self.record["dropped_tool_results"] = self.record.get("dropped_tool_results", 0) + 1
+                return True
+        return False
 
 
 class AgentHandler:
@@ -89,6 +149,9 @@ class AgentHandler:
         self._prefix = prefix
         self._format_mode = settings.response_format
         self._timeout = settings.timeout_seconds
+        self._model_name = settings.name
+        # Поправка оценки — общая на процесс: модель у процесса одна.
+        self._estimator = Estimator(settings.token_costs)
         # Сервер отверг строгие параметры, а повтор без них прошёл — они выключены до
         # перезапуска процесса.
         self._format_disabled = False
@@ -103,43 +166,59 @@ class AgentHandler:
             info = user_info(grants, data_periods(connection, grants))
             history = load_history(connection, user, session)
             actions = actions_block(connection, user, session)
-        box = ToolBox(lambda: transaction(self._engine, user), grants, context.message)
-        state = _State(
-            messages=[
-                self._prefix.system_message(),
-                *build_messages(info, history, actions, context.message),
-            ],
-            seen_chunks={chunk for item in history for chunk in item.chunk_ids},
+            stored = load_factor(connection, self._model_name)
+        self._estimator.factor = max(self._estimator.factor, stored)
+        box = ToolBox(
+            lambda: transaction(self._engine, user),
+            grants,
+            context.message,
+            count=self._estimator.text,
         )
-        state.record["history_chunks"] = sorted(state.seen_chunks)
+        state = _State(info, history, actions, context.message)
+        state.record["history_chunks"] = sorted(state.seen_chunks())
 
         sent = 0
         transient = 0
         while sent < MAX_CALLS:
             if context.deadline.expired():
                 raise TimeoutError("предел времени хода")
-            last = sent == MAX_CALLS - 1
-            request = self._request(state.messages, last, context.deadline.remaining())
+            prepared = self._prepare(state, sent, context.deadline.remaining())
+            if prepared is None:
+                return self._stop(context, state, "вход не помещается в бюджет")
+            request, estimate, raw, last = prepared
             try:
                 reply = self._complete(request, state)
             except TransientModelError as error:
-                # Повтор — один, и он тоже считается в лимит вызовов.
+                # Повтор — один, и он тоже считается в лимит вызовов и в бюджет хода.
                 sent += 1
                 transient += 1
+                state.spent += estimate
                 context.usage.record(0, 0)
-                state.record["calls"].append({"error": str(error), "last": last})
+                state.record["calls"].append(
+                    {"error": str(error), "last": last, "estimated_input_tokens": estimate}
+                )
                 if transient > 1:
                     raise ModelError("временная ошибка модели повторилась") from None
                 continue
             sent += 1
             usage = reply.usage
+            actual = usage.input_tokens
+            if actual is None:
+                # Расхода в ответе нет — фактом считается оценка.
+                state.spent += estimate
+            else:
+                state.spent += actual
+                self._learn(user, raw, actual)
             context.usage.record(
-                usage.input_tokens or 0, usage.output_tokens or 0, usage.cached_input_tokens
+                estimate if actual is None else actual,
+                usage.output_tokens or 0,
+                usage.cached_input_tokens,
             )
             call_record: dict[str, Any] = {
                 "last": last,
                 "tool_choice": request.tool_choice,
                 "response_format": request.response_format is not None,
+                "estimated_input_tokens": estimate,
                 "usage": {
                     "input_tokens": usage.input_tokens,
                     "output_tokens": usage.output_tokens,
@@ -149,7 +228,10 @@ class AgentHandler:
                 "truncated": reply.truncated,
                 "tool_calls": [],
             }
+            if actual is None:
+                call_record["input_estimated"] = True
             state.record["calls"].append(call_record)
+            state.last_reply = reply
 
             if reply.tool_calls and not last:
                 drafted = self._run_tools(reply, box, state, call_record)
@@ -161,7 +243,47 @@ class AgentHandler:
                 state.record["tool_calls_after_ban"] = [call.name for call in reply.tool_calls]
             # Оборванный ответ итогом не считается: его текст — обрубок.
             return self._finish(context, state, None if reply.truncated else reply, at_limit=last)
-        return self._finish(context, state, None, at_limit=True)
+        return self._stop(context, state, "лимит вызовов")
+
+    def _prepare(
+        self, state: _State, sent: int, remaining: float
+    ) -> tuple[ChatRequest, int, float, bool] | None:
+        """Вход следующего вызова в пределах бюджета: запрос, оценка, оценка без поправки,
+        последний ли вызов. `None` — даже без изменяемой части вызов не помещается.
+        """
+        system = self._prefix.system_message()
+        while True:
+            last = sent == MAX_CALLS - 1
+            request = self._request(state.messages(system), last, remaining)
+            estimate = self._estimator.request(request)
+            # Следующий вызов не меньше этого и вырастет не больше чем на потолок
+            # результата инструмента: не помещается — этот вызов последний.
+            if not last and state.spent + 2 * estimate + TOOL_RESULT_TOKENS > TURN_TOKENS:
+                last = True
+                request = self._request(state.messages(system), last, remaining)
+                estimate = self._estimator.request(request)
+            if estimate <= CALL_TOKENS and state.spent + estimate <= TURN_TOKENS:
+                return request, estimate, self._estimator.raw(request), last
+            if not state.drop_one():
+                state.record["budget"] = {"spent": state.spent, "estimate": estimate}
+                return None
+
+    def _learn(self, user: str, raw: float, actual: int) -> None:
+        """Оценка оказалась меньше факта — поправка модели растёт и сохраняется."""
+        if not self._estimator.learn(raw, actual):
+            return
+        log.info("поправка оценки токенов выросла до %.3f", self._estimator.factor)
+        with transaction(self._engine, user) as connection:
+            save_factor(connection, self._model_name, self._estimator.factor)
+
+    def _stop(self, context: TurnContext, state: _State, reason: str) -> TurnResult:
+        """Ход на лимите: текст последнего ответа модели, если он есть, иначе
+        `budget_exceeded`. Код ответ не составляет."""
+        state.record["stopped"] = reason
+        reply = state.last_reply
+        if reply is not None and reply.truncated:
+            reply = None
+        return self._finish(context, state, reply, at_limit=True)
 
     def _request(self, messages: list[dict[str, Any]], last: bool, remaining: float) -> ChatRequest:
         strict = not self._format_disabled
@@ -194,7 +316,7 @@ class AgentHandler:
     ) -> dict[str, Any] | None:
         """Выполняет вызовы ответа; возвращает параметры черновика, если он создан."""
         plan = plan_calls(reply.tool_calls)
-        state.messages.append(
+        state.turn.append(
             {
                 "role": "assistant",
                 "content": reply.content or "",
@@ -225,7 +347,7 @@ class AgentHandler:
                     partially_denied=result.partially_denied,
                 )
             )
-            state.seen_chunks.update(result.chunk_ids)
+            state.turn_chunks.update(result.chunk_ids)
             call_record["tool_calls"].append(
                 {
                     "name": call.name,
@@ -242,7 +364,7 @@ class AgentHandler:
             results[call.call_id] = envelope(Status.INVALID, note=NOT_EXECUTED)
             call_record["tool_calls"].append({"name": call.name, "skipped": True})
         for call in reply.tool_calls:
-            state.messages.append(
+            state.turn.append(
                 {"role": "tool", "tool_call_id": call.call_id, "content": results[call.call_id]}
             )
         return None
@@ -274,7 +396,7 @@ class AgentHandler:
             state.record["outcome_row"] = None
             return TurnResult(outcome, answer, self.prefix_hash, record=state.record)
 
-        accepted, dropped = _citations(parsed.citations, state.seen_chunks)
+        accepted, dropped = _citations(parsed.citations, state.seen_chunks())
         if dropped:
             state.record["dropped_citations"] = list(dropped)
         verdict = resolve_outcome(

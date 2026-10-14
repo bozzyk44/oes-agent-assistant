@@ -15,7 +15,7 @@ _GRANTS = (
     " app.dataset_version to {role}",
     # Версия схемы — для проверки готовности: сервис не отвечает «готов» на чужой схеме.
     "grant select on public.alembic_version to {role}",
-    "grant select, insert, update on app.sessions, app.actions to {role}",
+    "grant select, insert, update on app.sessions, app.actions, app.token_calibration to {role}",
     "grant select, insert on app.turns, app.messages to {role}",
     "grant select on dwh.production, dwh.downtime, dwh.equipment, kb.chunks to {role}",
     "grant execute on function kb.document_exists(text), dwh.equipment_site(text),"
