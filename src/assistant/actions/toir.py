@@ -9,6 +9,7 @@
 Секрет ТОиР живёт только здесь и в транспорте; в ответах и журнале его нет.
 """
 
+import http.client
 import json
 import logging
 import urllib.error
@@ -63,10 +64,18 @@ class ToirClient:
             "Idempotency-Key": idempotency_key,
             "Content-Type": "application/json",
         }
+        outcome = self._create(headers, params)
+        if not isinstance(outcome, Created):
+            # Причина без тела запроса и без заголовков: токена в журнале нет.
+            log.warning("заявка с ключом %s: %s", idempotency_key, outcome.reason)
+        return outcome
+
+    def _create(self, headers: Mapping[str, str], params: Mapping[str, Any]) -> Outcome:
         try:
             reply = self.transport("POST", "/requests", headers, dict(params))
-        except OSError as error:
+        except (OSError, http.client.HTTPException, ValueError) as error:
             # Запрос мог дойти: заявка, возможно, создана. Повтор с тем же ключом это решит.
+            # Неверный адрес в настройках тоже сюда: ответ клиенту — 502, а не 500.
             return Unknown(f"ТОиР недоступен: {type(error).__name__}")
         if 200 <= reply.status < 300:
             request_id = reply.body.get("request_id") if isinstance(reply.body, dict) else None

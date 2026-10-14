@@ -216,7 +216,8 @@ def build_app(
 
     def refused(error: Exception) -> HTTPException:
         # Текст отказа — категория, без параметров заявки и без ответа ТОиР.
-        status = {NotFound: 404, Forbidden: 403, Conflict: 409, ToirFailed: 502}[type(error)]
+        codes = ((NotFound, 404), (Forbidden, 403), (Conflict, 409), (ToirFailed, 502))
+        status = next(code for kind, code in codes if isinstance(error, kind))
         detail = {
             404: "нет такого действия",
             403: "действие подтверждает его автор, пока у него есть полномочие",

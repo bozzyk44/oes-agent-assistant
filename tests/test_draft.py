@@ -34,10 +34,25 @@ PARAMS = {"equipment_id": "EX-1", "description": "течь", "priority": 2}
         # Кириллические «Е» и «Х».
         "заявка на ЕХ-1",
         "(EX-1)",
+        "заявка на EX-1.",
+        "EX-1/EX-2 простаивают",
     ],
 )
 def test_identifier_in_message_is_accepted(message: str) -> None:
     assert mentioned(message, "EX-1")
+
+
+@pytest.mark.parametrize(
+    ("message", "equipment_id"),
+    [
+        ("заявка на EX_03", "EX_03"),
+        ("заявка на ПНС-1/2.", "ПНС-1/2"),
+        ("насос №4 течёт", "№4"),
+        ("дробилка-1 стоит", "ДРОБИЛКА-1"),
+    ],
+)
+def test_identifiers_with_other_characters_are_accepted(message: str, equipment_id: str) -> None:
+    assert mentioned(message, equipment_id)
 
 
 @pytest.mark.parametrize(
@@ -61,12 +76,29 @@ def test_empty_identifier_is_never_mentioned() -> None:
 
 @pytest.mark.db
 @pytest.mark.parametrize(
-    "value", ["EX-1", "ех 1", "Ex1", "ЕХ-1", "T-1", "т1", "АВЕКМНОРСТУХ-авекмнорстух 0"]
+    "value",
+    [
+        "EX-1",
+        "ех 1",
+        "Ex1",
+        "ЕХ-1",
+        "T-1",
+        "т1",
+        "АВЕКМНОРСТУХ-авекмнорстух 0",
+        "Дробилка-1",
+        "дробилка_ё/2",
+        "a\tb\nc",
+    ],
 )
 def test_python_key_matches_database_key(database: Database, value: str) -> None:
     with database.owner.connect() as connection:
         in_database = connection.scalar(text("select dwh.equipment_key(:v)"), {"v": value})
     assert equipment_key(value) == in_database
+
+
+def test_key_ignores_case_of_any_cyrillic_letter() -> None:
+    # Регистр приводится явной таблицей, а не по локали: «д» и «Д» — одно и то же.
+    assert equipment_key("дробилка-1") == equipment_key("ДРОБИЛКА 1")
 
 
 # --- Порядок проверок и параметры --------------------------------------------------------
@@ -101,13 +133,17 @@ def test_draft_uses_dataset_spelling(database: Database, small: Path) -> None:
         ("u-fin", "заявка на EX-1", {}, Status.DENIED),
         ("u-hr", "заявка на EX-1", {}, Status.DENIED),
         ("u-k1", "заявка на EX-1", {"priority": 4}, Status.INVALID),
-        ("u-k1", "заявка на EX-1", {"priority": "2"}, Status.INVALID),
+        ("u-k1", "заявка на EX-1", {"priority": "два"}, Status.INVALID),
         ("u-k1", "заявка на EX-1", {"priority": True}, Status.INVALID),
         ("u-k1", "заявка на EX-1", {"description": "  "}, Status.INVALID),
         ("u-k1", "заявка на EX-1", {"description": "a\x00b"}, Status.INVALID),
         ("u-k1", "заявка на EX-1", {"description": "x" * 10_001}, Status.INVALID),
         ("u-k1", "заявка на EX-1", {"equipment_id": 1}, Status.INVALID),
         ("u-eng", "заявка на EX-2", {"equipment_id": "EX-2"}, Status.OK),
+        # Открытые модели пишут приоритет по-разному.
+        ("u-k1", "заявка на EX-1", {"priority": 2.0}, Status.OK),
+        ("u-k1", "заявка на EX-1", {"priority": " 3 "}, Status.OK),
+        ("u-k1", "заявка на EX-1", {"priority": 2.5}, Status.INVALID),
     ],
 )
 def test_draft_checks(
@@ -184,6 +220,16 @@ def test_action_with_other_outcome_is_an_error(database: Database, small: Path) 
     def behave(context: TurnContext) -> TurnResult:
         draft = draft_result("h", TOOL, dict(PARAMS))
         return TurnResult(outcome="answer", answer="ответ", prefix_hash="h", action=draft.action)
+
+    service = make_service(database.service, database.service_url, Scripted(behave))
+    reply = service.turn("u-k1", new_session(), "заявка на EX-1")
+    assert (reply.body["outcome"], reply.body["pending_action"]) == ("error", None)
+
+
+@pytest.mark.db
+def test_action_outcome_without_action_is_an_error(database: Database, small: Path) -> None:
+    def behave(context: TurnContext) -> TurnResult:
+        return TurnResult(outcome="action", answer="заявка", prefix_hash="h")
 
     service = make_service(database.service, database.service_url, Scripted(behave))
     reply = service.turn("u-k1", new_session(), "заявка на EX-1")

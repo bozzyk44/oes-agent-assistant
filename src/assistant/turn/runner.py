@@ -257,8 +257,8 @@ def run_turn(runtime: Runtime, user_id: str, session_id: str, message: str) -> F
             outcome="error", answer=INTERNAL_ERROR, prefix_hash=runtime.handler.prefix_hash
         )
 
-    if result.action is not None and result.outcome != "action":
-        # Действие без исхода `action` — ошибка обработчика: ни то ни другое не отдаётся.
+    if (result.action is not None) != (result.outcome == "action"):
+        # Действие без исхода `action` или исход без действия — ошибка обработчика.
         log.error("ход %s: действие при исходе %s", turn_id, result.outcome)
         result = TurnResult(outcome="error", answer=INTERNAL_ERROR, prefix_hash=result.prefix_hash)
     action_id = runtime.new_action_id() if result.action is not None else None

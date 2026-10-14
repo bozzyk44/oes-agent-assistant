@@ -28,6 +28,10 @@ MAX_EQUIPMENT_ID = 200
 # и «XY-7» в нём не найдётся. Пробел внутри идентификатора допускается: «XY 7» — это
 # два слова подряд, и они проверяются вместе.
 _WORD = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+(?:-[0-9A-Za-zА-Яа-яЁё]+)*")
+# Широкое слово — всё, кроме пробелов, скобок, кавычек и знаков препинания между словами:
+# для идентификаторов с подчёркиванием, косой чертой, точкой или «№» внутри. Узкое
+# разбиение остаётся: «XY-7/XY-8» в сообщении — это два идентификатора.
+_WIDE_WORD = re.compile(r"[^\s,;:!?()\[\]{}«»\"']+")
 _MAX_WORDS = 3
 
 
@@ -49,13 +53,26 @@ def mentioned(message: str, equipment_id: str) -> bool:
     wanted = equipment_key(equipment_id)
     if not wanted:
         return False
-    words = [equipment_key(match.group()) for match in _WORD.finditer(message)]
+    narrow = [equipment_key(match.group()) for match in _WORD.finditer(message)]
+    wide = [equipment_key(match.group().rstrip(".")) for match in _WIDE_WORD.finditer(message)]
     return any(
         "".join(words[start : start + length]) == wanted
+        for words in (narrow, wide)
         for start in range(len(words))
         for length in range(1, _MAX_WORDS + 1)
         if start + length <= len(words)
     )
+
+
+def _priority(value: object) -> int | None:
+    """Приоритет 1–3. Открытые модели пишут число по-разному: `2`, `2.0`, `"2"`."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, str) and value.strip() in {"1", "2", "3"}:
+        value = int(value.strip())
+    return value if isinstance(value, int) and 1 <= value <= 3 else None
 
 
 def _storable(value: str) -> bool:
@@ -79,7 +96,8 @@ def prepare_repair(
     check = check_repair(connection, grants, equipment_id)
     if check.status is not Status.OK:
         return DraftResult(check.status)
-    if isinstance(priority, bool) or not isinstance(priority, int) or not 1 <= priority <= 3:
+    priority = _priority(priority)
+    if priority is None:
         return DraftResult(Status.INVALID, problem="priority: ожидалось целое от 1 до 3")
     if (
         not isinstance(description, str)

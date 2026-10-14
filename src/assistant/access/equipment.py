@@ -20,17 +20,21 @@ _LOCATE = text(
 )
 
 
-# Тот же ключ, что считает база функцией `dwh.equipment_key` (миграция 0002); совпадение
-# проверяет тест.
-_LOOKALIKES = str.maketrans("АВЕКМНОРСТУХавекмнорстух", "ABEKMHOPCTYXABEKMHOPCTYX")
-_SPACES_AND_HYPHENS = re.compile(r"[\s-]")
+# Тот же ключ, что считает база функцией `dwh.equipment_key` (миграция 0003), теми же
+# явными таблицами — без зависимости от локали; совпадение проверяет тест.
+_UPPER = str.maketrans(
+    "abcdefghijklmnopqrstuvwxyzабвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ",
+)
+_LOOKALIKES = str.maketrans("АВЕКМНОРСТУХ", "ABEKMHOPCTYX")
+_SPACES_AND_HYPHENS = re.compile(r"[ \t\n\r\f\v-]")
 
 
 def equipment_key(equipment_id: str) -> str:
     """Ключ сравнения идентификатора: без регистра, пробелов и дефисов, похожие
     кириллические буквы приведены к латинским.
     """
-    return _SPACES_AND_HYPHENS.sub("", equipment_id).translate(_LOOKALIKES).upper()
+    return _SPACES_AND_HYPHENS.sub("", equipment_id).translate(_UPPER).translate(_LOOKALIKES)
 
 
 @dataclass(frozen=True)

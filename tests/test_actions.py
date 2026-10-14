@@ -259,6 +259,30 @@ def test_grant_revoked_before_confirmation(database: Database, small: object, to
             )
 
 
+def test_grant_revoked_before_retry_from_confirming(
+    database: Database, small: object, toir: Toir
+) -> None:
+    service = _service(database, toir)
+    action_id = _propose(service)
+    toir.fault = _failing(503)
+    assert _confirm(service, action_id).status_code == 502
+    toir.fault = None
+    calls = toir.calls
+    with database.owner.begin() as connection:
+        connection.execute(
+            text("delete from app.repair_grants where user_id = 'u-k1' and site = 'K1'")
+        )
+    try:
+        assert _confirm(service, action_id).status_code == 403
+        assert toir.calls == calls
+        assert _state(database, action_id)[0] == "confirming"
+    finally:
+        with database.owner.begin() as connection:
+            connection.execute(
+                text("insert into app.repair_grants (user_id, site) values ('u-k1', 'K1')")
+            )
+
+
 def test_confirmation_or_rejection_by_another_user(
     database: Database, small: object, toir: Toir
 ) -> None:
