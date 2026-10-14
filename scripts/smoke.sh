@@ -262,6 +262,41 @@ step "сервис и заглушка отвечают внутри сети"
 case "$(fetch http://127.0.0.1:8000/healthz)" in *'"ok"'*) ;; *) fail "сервис не готов" ;; esac
 case "$(fetch http://toir:8001/healthz)" in *'"ok"'*) ;; *) fail "заглушка недоступна сервису" ;; esac
 
+# Заявка в заглушку изнутри контейнера сервиса: адрес и токен — из его окружения,
+# в вывод сценария токен не попадает.
+toir_call() {
+    $COMPOSE exec -T assistant python -c "
+import json, os, sys, urllib.error, urllib.request as u
+key, mode = sys.argv[1], sys.argv[2]
+base = os.environ['TOIR_URL']
+auth = {'Authorization': 'Bearer ' + os.environ['TOIR_TOKEN']}
+def call(method, path, headers, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    request = u.Request(base + path, data=data, method=method,
+                        headers={**headers, 'Content-Type': 'application/json'})
+    try:
+        with u.urlopen(request, timeout=5) as reply:
+            return reply.status, json.loads(reply.read())
+    except urllib.error.HTTPError as error:
+        return error.code, None
+body = {'equipment_id': 'SMOKE-1', 'description': 'проверка сборки', 'priority': 3}
+if mode == 'create':
+    first = call('POST', '/requests', {**auth, 'Idempotency-Key': key}, body)
+    again = call('POST', '/requests', {**auth, 'Idempotency-Key': key}, body)
+    if first[0] != 201 or again != (200, first[1]):
+        sys.exit('повтор с тем же ключом не вернул ту же заявку')
+    if call('GET', '/requests', {})[0] != 401:
+        sys.exit('список заявок отдан без токена')
+status, rows = call('GET', '/requests', auth)
+if status != 200 or [row['idempotency_key'] for row in rows].count(key) != 1:
+    sys.exit('заявки с ключом нет в списке или она не одна')
+" "$1" "$2"
+}
+smoke_key="smoke-$(date +%s)-$$"
+
+step "заглушка ТОиР: заявка, повтор с тем же ключом, отказ без токена"
+toir_call "$smoke_key" create || fail "заглушка ТОиР принимает заявки не по контракту"
+
 step "имя host.docker.internal разрешается в контейнере сервиса"
 $COMPOSE exec -T assistant python -c \
     "import socket; socket.gethostbyname('host.docker.internal')" \
@@ -293,6 +328,7 @@ step "повторный старт поверх существующего то
 $COMPOSE down --remove-orphans >/dev/null 2>&1
 $COMPOSE up --detach --wait
 case "$(fetch http://toir:8001/healthz)" in *'"ok"'*) ;; *) fail "после повторного старта заглушка недоступна" ;; esac
+toir_call "$smoke_key" check || fail "заявка в заглушке ТОиР не пережила перезапуск"
 # Тот же набор поверх того же тома: загрузчик ничего не меняет, сессии и действия целы.
 case "$($COMPOSE logs --no-log-prefix loader 2>&1)" in
     *"набор не изменился"*) ;;
