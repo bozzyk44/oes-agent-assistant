@@ -328,6 +328,20 @@ def test_tenths_check_catches_a_whole_number(
             assert any(question.qid in p and "десятыми" in p for p in problems), question.qid
 
 
+def test_tenths_check_catches_a_question_without_the_mark(
+    dataset: Dataset, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Новый вопрос «до десятых», которому забыли пометку, иначе прошёл бы мимо проверки.
+    root, world = dataset
+    built = build_questions(world, render(world))
+    spoiled = tuple(replace(question, tenths=False) for question in built)
+    monkeypatch.setattr("datagen.check.build_questions", lambda *_: spoiled)
+    problems = check_traps(root, world)
+    for question in built:
+        if question.tenths:
+            assert any(question.qid in p and "без пометки" in p for p in problems), question.qid
+
+
 def test_holdout_seed_is_neither_data_nor_test_seed() -> None:
     assert HOLDOUT_SEED not in (DEFAULT_SEED, SECOND_SEED)
 
