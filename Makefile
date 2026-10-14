@@ -10,10 +10,11 @@ COMPOSE_SMOKE := docker compose -p $(COMPOSE_PROJECT)-smoke
 # Файлы, которые контейнер пишет в каталоги хоста, принадлежат тому, кто запустил make.
 HOST_USER := $(shell id -u):$(shell id -g)
 
-.PHONY: help env data run migrate migrate-check down reset test eval smoke ci lock
+.PHONY: help env data data-holdout run migrate migrate-check down reset test eval smoke ci lock
 
 help:
 	@echo "make data   — сгенерировать набор в data/"
+	@echo "make data-holdout — набор для итоговой проверки с другим зерном в holdout/"
 	@echo "make run    — создать .env при необходимости и поднять сервис, заглушку ТОиР и PostgreSQL"
 	@echo "make down   — остановить; том базы остаётся"
 	@echo "make reset  — остановить и удалить том базы"
@@ -30,6 +31,16 @@ env:
 
 data: env
 	$(COMPOSE) --profile tools run --rm --build --user $(HOST_USER) datagen
+
+# Набор для итоговой проверки: промпт настраивается на data/, а проверяется ещё и на наборе
+# с другим зерном, на котором его не подгоняли. В репозиторий он не кладётся: его
+# воспроизводит та же команда.
+# Зерно — HOLDOUT_SEED из src/datagen/world.py; переменная make его переопределяет.
+data-holdout: env
+	mkdir -p holdout
+	$(COMPOSE) --profile tools run --rm --build --user $(HOST_USER) \
+		-v "$(CURDIR)/holdout:/app/holdout" datagen \
+		python -m datagen --holdout --out holdout $(if $(HOLDOUT_SEED),--seed $(HOLDOUT_SEED))
 
 run: env
 	$(COMPOSE) up --build

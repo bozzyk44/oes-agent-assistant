@@ -105,7 +105,8 @@ def test_closed_numbers_are_absent_from_everything_else(dataset: Dataset) -> Non
     root, world = dataset
     closed = {world.docs[role].doc_id: numbers for role, numbers in world.confidential().items()}
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
+        # В файлах вопросов закрытые числа стоят в `forbidden` по назначению.
+        if not path.is_file() or path.name.startswith("questions"):
             continue
         text = normalize(path.read_text(encoding="utf-8"))
         for doc_id, numbers in closed.items():
