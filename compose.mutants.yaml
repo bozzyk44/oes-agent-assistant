@@ -1,0 +1,87 @@
+# Мутанты: сборки сервиса с одной отключённой защитой — `make mutants`.
+# Дополняет compose.yaml и запускается только в своём проекте compose со своим томом базы:
+# роль с обходом построчной защиты появляется лишь там. Процесс мутанта и послушная модель
+# живут в образе стадии dev — в основной образ точка входа мутантов не попадает.
+
+x-dev: &dev
+  build:
+    context: .
+    target: dev
+
+services:
+  # Роль с обходом построчной защиты: после миграций, под администратором сервера.
+  mutant-role:
+    <<: *dev
+    profiles: ["mutants"]
+    command: ["python", "-m", "tests.mutants", "role"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?не задан POSTGRES_PASSWORD}
+      DATABASE_OWNER_URL: ${DATABASE_OWNER_URL:?не задан DATABASE_OWNER_URL}
+      BYPASS_DATABASE_URL: ${BYPASS_DATABASE_URL:?не задан BYPASS_DATABASE_URL — make env его допишет}
+    depends_on:
+      loader:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # Сервис с подменами мутанта MUTANT. Порт наружу не публикуется: прогон идёт внутри сети.
+  mutant:
+    extends:
+      file: compose.yaml
+      service: assistant
+    <<: *dev
+    profiles: ["mutants"]
+    command: ["python", "-m", "tests.mutants", "serve", "${MUTANT:-control}"]
+    environment:
+      BYPASS_DATABASE_URL: ${BYPASS_DATABASE_URL:?не задан BYPASS_DATABASE_URL — make env его допишет}
+      # Модель: настоящая из .env или послушная заглушка — её задаёт scripts/mutants.sh.
+      MODEL_BASE_URL: ${MUTANT_MODEL_BASE_URL:-${MODEL_BASE_URL:-}}
+      MODEL_API_KEY: ${MUTANT_MODEL_API_KEY:-${MODEL_API_KEY:-}}
+      MODEL_NAME: ${MUTANT_MODEL_NAME:-${MODEL_NAME:-}}
+    ports: !reset []
+    depends_on:
+      mutant-role:
+        condition: service_completed_successfully
+      toir:
+        condition: service_healthy
+
+  # Послушная модель по HTTP: запрашивает запрещённое прямо, по атакам из набора.
+  obedient:
+    <<: *dev
+    profiles: ["mutants"]
+    command: ["python", "-m", "tests.mutants", "obedient"]
+    environment:
+      QUESTIONS: /data/questions.jsonl
+    volumes:
+      - type: bind
+        source: ${DATA_DIR:-./data}
+        target: /data
+        read_only: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8002/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
+    mem_limit: 256m
+
+  evalrun:
+    environment:
+      ASSISTANT_URL: http://mutant:8000
+      EVAL_DIR: /app/eval/mutants/${MUTANT_MODE:-stub}/${MUTANT:-control}
+
+  # Таблица из прогонов: без сервиса и без сети.
+  mutant-table:
+    <<: *dev
+    profiles: ["mutants"]
+    command: ["python", "-m", "tests.mutants", "table", "/app/eval/mutants"]
+    network_mode: none
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - type: bind
+        source: ${DATA_DIR:-./data}
+        target: /data
+        read_only: true
+      - ./eval:/app/eval
