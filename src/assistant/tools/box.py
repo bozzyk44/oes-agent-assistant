@@ -33,7 +33,7 @@ from assistant.access import (
 )
 from assistant.actions.draft import prepare_repair
 from assistant.ingest.chunks import TOOL_RESULT_TOKENS
-from assistant.tools.arith import BadExpression, evaluate
+from assistant.tools.arith import NUMBER, BadExpression, evaluate, normalize_digits
 from assistant.tools.kpi import _number, round_half_up, run_kpi
 from assistant.tools.schemas import (
     ARGUMENTS,
@@ -109,12 +109,16 @@ class ToolBox:
     # Оценка токенов куска входа — та же, что у проверки бюджета хода.
     count: Count
     limit: int = TOOL_RESULT_TOKENS
+    # Результаты `ok` этого хода в том виде, в каком их увидела модель: опора входов расчёта.
+    sources: list[str] = field(default_factory=list)
 
     def run(self, name: str, raw_arguments: str) -> ToolResult:
         result = self._run(name, raw_arguments)
         if self.count(result.content) > self.limit:
             result.content = _cut(result.content, self.count, self.limit)
             result.record["cut"] = True
+        if result.status is Status.OK:
+            self.sources.append(normalize_digits(result.content))
         return result
 
     def _run(self, name: str, raw_arguments: str) -> ToolResult:
@@ -137,7 +141,9 @@ class ToolBox:
                 case KpiArgs():
                     return self._kpi(connection, args)
                 case CalculateArgs():
-                    return _calculate(args)
+                    return _calculate(
+                        args, normalize_digits("\n".join([self.message, *self.sources]))
+                    )
                 case RepairArgs():
                     return self._repair(connection, arguments)
         return ToolResult(Status.INVALID, envelope(Status.INVALID, note="неизвестные аргументы"))
@@ -279,7 +285,30 @@ def _problem(error: ValueError) -> str:
     return "аргументы — не объект JSON"
 
 
-def _calculate(args: CalculateArgs) -> ToolResult:
+# Постоянная перевода доли в проценты: законна без источника.
+CONSTANTS = frozenset({"100"})
+
+
+def _plain(value: Decimal) -> str:
+    """Число как в тексте: без знака, без лишних нулей и без экспоненты."""
+    return format(abs(value).normalize(), "f")
+
+
+def _unsourced(args: CalculateArgs, sources: str) -> list[str]:
+    """Входы расчёта, которых нет ни в результатах инструментов хода, ни в сообщении
+    пользователя. Сравнение — подстрокой после той же нормализации, что у прогона: «2852.5»
+    опирается на «2 852,50» документа. Результат прежнего расчёта — тоже опора: его входы
+    уже проверены.
+    """
+    if args.operation == "expression":
+        values = [Decimal(item) for item in NUMBER.findall(normalize_digits(args.expression or ""))]
+    else:
+        values = list(args.numbers)
+    inputs = dict.fromkeys(_plain(value) for value in values)
+    return [item for item in inputs if item not in CONSTANTS and item not in sources]
+
+
+def _calculate(args: CalculateArgs, sources: str) -> ToolResult:
     numbers = args.numbers
     try:
         match args.operation:
@@ -307,6 +336,14 @@ def _calculate(args: CalculateArgs) -> ToolResult:
     except ArithmeticError:
         note = "результат вне точности расчёта"
         return ToolResult(Status.INVALID, envelope(Status.INVALID, note=note))
+    if missing := _unsourced(args, sources):
+        note = (
+            f"нет источника у чисел {', '.join(missing)}: их нет в результатах инструментов"
+            " этого хода и в сообщении пользователя. Получите их инструментом"
+        )
+        return ToolResult(
+            Status.INVALID, envelope(Status.INVALID, note=note), record={"unsourced": missing}
+        )
     return ToolResult(Status.OK, envelope(Status.OK, {"result": result}))
 
 

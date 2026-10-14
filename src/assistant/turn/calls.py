@@ -6,6 +6,7 @@
 получает «не выполнен», если ход продолжится: протокол требует ответа на каждый вызов.
 """
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -13,6 +14,14 @@ from typing import Protocol
 from assistant.actions.draft import TOOL as REPAIR_TOOL
 
 NOT_EXECUTED = "не выполнен: в этом ответе запрошена подготовка заявки"
+# Разметка вызова инструмента в шаблонах открытых моделей — тот же список, что в диагностике
+# прогона. Одинокий маркер без тела вызова — след шаблона, а не вызов.
+CALL_IN_TEXT = re.compile(r"(?:<\|?tool_call\|?>|\[TOOL_CALLS\])\s*[^\s<]|<function=")
+CALL_IN_TEXT_NOTE = (
+    "Сообщение сервиса, а не пользователя: в тексте прошлого ответа есть разметка вызова"
+    " инструмента. Такой вызов не распознан и не выполнен, его результата нет. Если он нужен,"
+    " запросите его снова обычным вызовом инструмента."
+)
 
 
 class Named(Protocol):

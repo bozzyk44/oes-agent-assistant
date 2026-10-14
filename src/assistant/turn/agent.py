@@ -34,7 +34,7 @@ from assistant.model import (
     TransientModelError,
 )
 from assistant.tools.box import ToolBox, ToolResult, envelope
-from assistant.turn.calls import NOT_EXECUTED, plan_calls
+from assistant.turn.calls import CALL_IN_TEXT, CALL_IN_TEXT_NOTE, NOT_EXECUTED, plan_calls
 from assistant.turn.context import (
     HistoryMessage,
     actions_block,
@@ -426,6 +426,12 @@ class AgentHandler:
             state.turn.append(
                 {"role": "tool", "tool_call_id": call.call_id, "content": results[call.call_id]}
             )
+        # Рядом со структурными вызовами — вызов разметкой шаблона в тексте: провайдер его не
+        # распознал. Код его не выполняет — разбирать чужие шаблоны значило бы принять за вызов
+        # и цитату из документа — и говорит модели повторить его структурно.
+        if CALL_IN_TEXT.search(strip_thinking(reply.content or "")):
+            state.turn.append({"role": "user", "content": CALL_IN_TEXT_NOTE})
+            call_record["call_in_text"] = True
         return None
 
     def _draft(self, context: TurnContext, state: _State, params: dict[str, Any]) -> TurnResult:

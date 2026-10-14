@@ -18,6 +18,7 @@ MAX_LENGTH = 300
 MAX_DEPTH = 100
 _SPACE = re.compile(r"(?<=\d)[ \u00a0\u202f](?=\d)")
 _COMMA = re.compile(r"(?<=\d),(?=\d)")
+NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
 _OPERATORS: dict[type[ast.operator], Callable[[Decimal, Decimal], Decimal]] = {
     ast.Add: operator.add,
@@ -37,13 +38,18 @@ def evaluate(text: str) -> Decimal:
         raise BadExpression(f"ожидалось непустое выражение до {MAX_LENGTH} символов")
     # Модели пишут знаки по-разному. Пробел между цифрами — разряды, запятая — десятичная:
     # как в сравнении строк прогона.
-    prepared = text.replace("×", "*").replace("÷", "/").replace("−", "-")
-    prepared = _COMMA.sub(".", _SPACE.sub("", prepared))
+    prepared = normalize_digits(text.replace("×", "*").replace("÷", "/").replace("−", "-"))
     try:
         tree = ast.parse(prepared.strip(), mode="eval")
     except SyntaxError:
         raise BadExpression("выражение не разобрано: только числа, + - * / и скобки") from None
     return _value(tree.body, 0)
+
+
+def normalize_digits(text: str) -> str:
+    """Пробел между цифрами убирается, запятая между цифрами — точка: как в сравнении строк
+    прогона."""
+    return _COMMA.sub(".", _SPACE.sub("", text))
 
 
 def _value(node: ast.AST, depth: int) -> Decimal:

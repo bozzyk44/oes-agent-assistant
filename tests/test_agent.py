@@ -205,6 +205,38 @@ def test_other_calls_in_a_repair_reply_are_not_executed(database: Database, smal
     assert not any("<<<фрагмент" in item for item in results)
 
 
+def test_call_left_in_text_is_not_executed_and_noted(database: Database, small: Path) -> None:
+    # Один вызов структурный, второй — разметкой шаблона в тексте: провайдер его не распознал.
+    leaked = '<|tool_call>call:query_kpi{table:"production"}<tool_call|>'
+    model = ScriptedModel([tools(call(SEARCH, query="памятка"), content=leaked), final("ок")])
+    service, _ = _service(database, model)
+    turn_id = service.turn("u-eng", new_session(), "Вопрос").body["turn_id"]
+    second = model.requests[1].messages
+    assert [item["role"] for item in second[-3:]] == ["assistant", "tool", "user"]
+    assert "не выполнен" in second[-1]["content"] and "обычным вызовом" in second[-1]["content"]
+    assert _results(model, KPI) == []
+    record = service.client.get(f"/turns/{turn_id}", headers={"X-User-ID": "u-eng"}).json()
+    assert record["record"]["calls"][0]["call_in_text"] is True
+
+
+def test_lone_call_marker_in_text_is_not_noted(database: Database, small: Path) -> None:
+    # Одинокий маркер без тела — след шаблона: пометки нет.
+    model = ScriptedModel(
+        [tools(call(SEARCH, query="памятка"), content="<|tool_call>"), final("ок")]
+    )
+    service, _ = _service(database, model)
+    service.turn("u-eng", new_session(), "Вопрос")
+    assert model.requests[1].messages[-1]["role"] == "tool"
+
+
+def test_call_marker_pattern_matches_eval_diagnostics() -> None:
+    # Код хода и диагностика прогона считают вызовом в тексте одно и то же.
+    from assistant.turn.calls import CALL_IN_TEXT
+    from evalrun.diagnostics import _CALL_IN_TEXT
+
+    assert CALL_IN_TEXT.pattern == _CALL_IN_TEXT.pattern
+
+
 # --- Лимит вызовов и формат ----------------------------------------------------------------
 
 
@@ -457,11 +489,20 @@ def test_info(database: Database, small: Path) -> None:
 # --- Инструменты: расчёт и КХД -------------------------------------------------------------
 
 
-def _tool(database: Database, user: str, name: str, **arguments: Any) -> dict[str, Any]:
+def _tool(
+    database: Database, user: str, name: str, message: str = "Вопрос", **arguments: Any
+) -> dict[str, Any]:
     model = ScriptedModel([tools(call(name, **arguments)), final("ок")])
     service, _ = _service(database, model)
-    service.turn(user, new_session(), "Вопрос")
+    service.turn(user, new_session(), message)
     return _results(model, name)[0]
+
+
+def _calc(database: Database, **arguments: Any) -> dict[str, Any]:
+    """Расчёт с числами в сообщении пользователя: без них входы расчёта без источника."""
+    numbers = " ".join(str(item) for item in arguments.get("numbers", []))
+    message = f"Посчитай: {numbers} {arguments.get('expression', '')}"
+    return _tool(database, "u-eng", CALCULATE, message, **arguments)
 
 
 @pytest.mark.parametrize(
@@ -482,42 +523,76 @@ def test_calculate(
     decimals: int,
     expected: Any,
 ) -> None:
-    result = _tool(
-        database, "u-eng", CALCULATE, operation=operation, numbers=numbers, decimals=decimals
-    )
+    result = _calc(database, operation=operation, numbers=numbers, decimals=decimals)
     assert result["data"]["result"] == expected
 
 
 def test_calculate_expression(database: Database, small: Path) -> None:
     # Доля факта от плана на период одним вызовом: факт / (план на смену × смены) × 100.
+    result = _calc(
+        database, operation="expression", expression="61777 / (2 290 × 28) * 100", decimals=1
+    )
+    assert result["data"]["result"] == "96.3"
+    bad = _calc(database, operation="expression", expression="__import__('os')")
+    assert bad["status"] == "invalid"
+    assert _calc(database, operation="sum", numbers=[])["status"] == "invalid"
+
+
+def test_calculate_refuses_bad_input(database: Database, small: Path) -> None:
+    assert _calc(database, operation="ratio", numbers=[1, 0])["status"] == "invalid"
+    assert _calc(database, operation="percent", numbers=[1])["status"] == "invalid"
+    # 0/0 и результат вне точности расчёта — тоже `invalid`, а не обрыв хода.
+    for numbers, decimals in (([0, 0], 1), ([1e30, 1e-30], 6)):
+        result = _calc(database, operation="ratio", numbers=numbers, decimals=decimals)
+        assert result["status"] == "invalid"
+
+
+def _sum_and_percent(database: Database, *numbers: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Сумма добычи по участкам, затем процент по заданным числам; без чисел в сообщении."""
+    model = ScriptedModel(
+        [
+            tools(
+                call(
+                    KPI,
+                    table="production",
+                    group_by=["site"],
+                    aggregates=[{"function": "sum", "column": "tonnes"}],
+                )
+            ),
+            tools(call(CALCULATE, operation="percent", numbers=list(numbers))),
+            final("ок"),
+        ]
+    )
+    service, _ = _service(database, model)
+    turn_id = service.turn("u-eng", new_session(), "Какая доля первого участка?").body["turn_id"]
+    record = service.client.get(f"/turns/{turn_id}", headers={"X-User-ID": "u-eng"}).json()
+    return _results(model, CALCULATE)[0], record["record"]
+
+
+def test_calculate_inputs_come_from_tool_results(database: Database, small: Path) -> None:
+    # Суммы K1 и K2 — 210 и 630 т: оба числа есть в результате запроса к КХД.
+    result, _ = _sum_and_percent(database, 210, 630)
+    assert result["data"]["result"] == "33.3"
+
+
+def test_calculate_refuses_a_number_without_source(database: Database, small: Path) -> None:
+    # 114300 нет ни в результатах инструментов, ни в сообщении: модель его выдумала.
+    result, record = _sum_and_percent(database, 114300, 630)
+    assert result["status"] == "invalid"
+    assert "114300" in result["note"] and "630" not in result["note"]
+    assert record["calls"][1]["tool_calls"][0]["unsourced"] == ["114300"]
+
+
+def test_calculate_constant_100_needs_no_source(database: Database, small: Path) -> None:
     result = _tool(
         database,
         "u-eng",
         CALCULATE,
+        "Посчитай 7 из 9",
         operation="expression",
-        expression="61777 / (2 290 × 28) * 100",
-        decimals=1,
+        expression="7 / 9 * 100",
     )
-    assert result["data"]["result"] == "96.3"
-    bad = _tool(database, "u-eng", CALCULATE, operation="expression", expression="__import__('os')")
-    assert bad["status"] == "invalid"
-    assert _tool(database, "u-eng", CALCULATE, operation="sum", numbers=[])["status"] == "invalid"
-
-
-def test_calculate_refuses_bad_input(database: Database, small: Path) -> None:
-    assert (
-        _tool(database, "u-eng", CALCULATE, operation="ratio", numbers=[1, 0])["status"]
-        == "invalid"
-    )
-    assert (
-        _tool(database, "u-eng", CALCULATE, operation="percent", numbers=[1])["status"] == "invalid"
-    )
-    # 0/0 и результат вне точности расчёта — тоже `invalid`, а не обрыв хода.
-    for numbers, decimals in (([0, 0], 1), ([1e30, 1e-30], 6)):
-        result = _tool(
-            database, "u-eng", CALCULATE, operation="ratio", numbers=numbers, decimals=decimals
-        )
-        assert result["status"] == "invalid"
+    assert result["data"]["result"] == "77.8"
 
 
 def test_downtime_crossing_midnight_is_split_and_clipped(database: Database, small: Path) -> None:
