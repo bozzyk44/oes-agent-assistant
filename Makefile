@@ -88,11 +88,11 @@ eval: env
 
 # Отчёт из eval/results.jsonl без обращения к сервису и сравнение двух прогонов из eval/.
 eval-report: env
-	$(COMPOSE) --profile tools run --rm --no-deps --user $(HOST_USER) evalrun python -m evalrun report
+	$(COMPOSE) --profile tools run --rm --build --no-deps --user $(HOST_USER) evalrun python -m evalrun report
 
 eval-compare: env
 	@test -n "$(A)" -a -n "$(B)" || { echo 'нужно: make eval-compare A=eval/runs/<первый>.jsonl B=eval/runs/<второй>.jsonl'; exit 2; }
-	$(COMPOSE) --profile tools run --rm --no-deps --user $(HOST_USER) evalrun python -m evalrun compare /app/$(A) /app/$(B)
+	$(COMPOSE) --profile tools run --rm --build --no-deps --user $(HOST_USER) evalrun python -m evalrun compare /app/$(A) /app/$(B)
 
 smoke: env
 	@COMPOSE='$(COMPOSE_SMOKE)' SMOKE_PROJECT='$(COMPOSE_PROJECT)-smoke' MAKE='$(MAKE)' sh scripts/smoke.sh

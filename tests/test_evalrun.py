@@ -424,3 +424,38 @@ def test_busy_session_is_retried_after_a_pause() -> None:
     status, _, retries = runner.ask(_question(), "s1")
     assert (status, retries) == (200, 2)
     assert pauses == [2.0, 4.0]
+
+
+RECORDED = Path(__file__).parent / "recorded" / "eval_turns.jsonl"
+
+
+@pytest_db
+def test_recorded_real_model_turns_replay_in_ci(database: Any, tmp_path: Path) -> None:
+    """Прогон в CI на записанных ответах настоящей модели: набор генерируется тем же
+    зерном, что `data/`, ответы модели — из записанного прогона. Вердикты и исходы должны
+    совпасть с записанными: так проверяется, что сам прогон, проверки и цикл хода не
+    сломались, без модели и сети."""
+    from sqlalchemy import text
+
+    from datagen.render import write_dataset
+    from datagen.world import DEFAULT_SEED, build_world
+    from tests.replay import ReplayModel
+
+    lines = [json.loads(line) for line in RECORDED.read_text(encoding="utf-8").splitlines()]
+    config, turns = lines[0], lines[1:]
+    root = tmp_path / "data"
+    write_dataset(build_world(DEFAULT_SEED), root)
+    database.load(root, fresh=True)
+    with database.owner.begin() as connection:
+        loaded = connection.scalar(text("select content_hash from app.dataset_version"))
+    if loaded != config["dataset_hash"]:
+        pytest.skip("набор изменился после записи прогона: нужен новый платный прогон")
+    attempts = max(turn["attempt"] for turn in turns)
+    out = tmp_path / "eval" / "results.jsonl"
+    _run(database, ReplayModel.from_turns(turns), root / "questions.jsonl", out, attempts)
+    _, replayed = read(out)
+    got = {(line["question"]["id"], line["attempt"]): line for line in replayed}
+    for turn in turns:
+        line = got[(turn["question"]["id"], turn["attempt"])]
+        assert line["response"]["outcome"] == turn["outcome"], turn["question"]["id"]
+        assert line["passed"] == turn["passed"], (turn["question"]["id"], line["checks"])

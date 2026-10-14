@@ -30,6 +30,46 @@ def _reply(call: dict[str, Any], number: int) -> ModelReply:
     )
 
 
+def extract(path: Path) -> list[dict[str, Any]]:
+    """Из `results.jsonl` — только то, что нужно для проигрывания: ответы модели по вызовам
+    и записанные вердикты. Результатов инструментов нет: их заново считает сервис."""
+    out: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        item = json.loads(line)
+        if item.get("type") == "config":
+            keys = ("run_id", "model", "prefix_hash", "dataset_hash", "questions_hash")
+            out.insert(0, {"type": "config", **{key: item.get(key) for key in keys}})
+            continue
+        record = item.get("turn_record")
+        if item.get("type") != "attempt" or not record:
+            continue
+        calls = [
+            {
+                "content": call.get("content"),
+                "tool_calls": [
+                    {"name": t["name"], "arguments": t.get("arguments", "")}
+                    for t in call.get("tool_calls", [])
+                ],
+                "usage": call.get("usage"),
+                "truncated": call.get("truncated", False),
+            }
+            for call in record.get("calls", [])
+            if "error" not in call
+        ]
+        response = item.get("response") or {}
+        out.append(
+            {
+                "type": "turn",
+                "question": item["question"],
+                "attempt": item["attempt"],
+                "calls": calls,
+                "passed": item["passed"],
+                "outcome": response.get("outcome"),
+            }
+        )
+    return out
+
+
 @dataclass
 class ReplayModel:
     # Вопрос → ответы модели по порядку вызовов, по одному списку на каждую попытку.
@@ -38,15 +78,14 @@ class ReplayModel:
 
     @classmethod
     def from_results(cls, path: Path) -> ReplayModel:
+        return cls.from_turns(extract(path)[1:])
+
+    @classmethod
+    def from_turns(cls, turns: list[dict[str, Any]]) -> ReplayModel:
         model = cls()
-        for line in path.read_text(encoding="utf-8").splitlines():
-            item = json.loads(line)
-            record = item.get("turn_record")
-            if item.get("type") != "attempt" or not record:
-                continue
-            calls = [call for call in record.get("calls", []) if "error" not in call]
-            replies = [_reply(call, number) for number, call in enumerate(calls)]
-            model.turns.setdefault(item["question"]["question"], []).append(replies)
+        for turn in turns:
+            replies = [_reply(call, number) for number, call in enumerate(turn["calls"])]
+            model.turns.setdefault(turn["question"]["question"], []).append(replies)
         return model
 
     def complete(self, request: ChatRequest) -> ModelReply:
@@ -61,3 +100,14 @@ class ReplayModel:
             # Последний вызов этой попытки: следующая попытка берёт свою запись.
             attempts.pop(0)
         return replies[min(number, len(replies) - 1)]
+
+
+if __name__ == "__main__":
+    import sys
+
+    lines = extract(Path(sys.argv[1]))
+    target = Path(sys.argv[2])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines), encoding="utf-8"
+    )

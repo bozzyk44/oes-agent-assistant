@@ -292,7 +292,7 @@ def _diagnostics(attempts: list[dict[str, Any]]) -> list[str]:
             ("Вызовов инструментов вопреки запрету", str(_sum(diags, "tool_calls_after_ban"))),
             ("Путь разбора итога", ", ".join(f"{k}: {v}" for k, v in paths.most_common())),
             (
-                "Расчётных вопросов с вызовом calculate",
+                "Ходов с calculate среди вопросов с числом в ожидании",
                 _share(_sum(numeric, "calculate_used"), len(numeric)),
             ),
             ("Опора чисел ответа на результаты инструментов или вопрос", _share(grounded, numbers)),
