@@ -44,6 +44,9 @@ mkdir -p "$smoke_data"
 export DATA_DIR="$smoke_data"
 # Имя модели задано только в окружении оболочки: в .env копии оно пустое.
 export MODEL_NAME="smoke-model-$$"
+# Адрес и ключ модели сценарий обнуляет: в рабочей копии .env — ссылка на настоящий,
+# и ход, проверяемый ниже, не должен уйти к настоящей модели.
+export MODEL_BASE_URL="" MODEL_API_KEY=""
 mkdir -p "$PWD/.smoke/q dir"
 : > "$PWD/.smoke/q dir/my questions.jsonl"
 
@@ -227,6 +230,33 @@ step "make eval QUESTIONS=<путь с пробелами> монтирует к
 $MAKE eval COMPOSE_PROJECT="$SMOKE_PROJECT" QUESTIONS=".smoke/q dir/my questions.jsonl" \
     EVAL_ARGS='sh -c "test \"\$$QUESTIONS\" = \"/questions/my questions.jsonl\" && test -f \"\$$QUESTIONS\" && test -d /data && test -w /app/eval"' \
     || fail "make eval не увидел свой файл вопросов"
+
+step "ход: без заголовка — 401, без модели — ответ по контракту с outcome: error"
+# Адрес модели в сценарии пуст: сервис стартовал, а ход честно завершается ошибкой.
+[ -z "$($COMPOSE exec -T assistant printenv MODEL_BASE_URL)" ] \
+    || fail "адрес модели дошёл до сервиса: сценарий сборки не должен звать настоящую модель"
+$COMPOSE exec -T assistant python -c "
+import json, os, sys, urllib.error, urllib.request as u
+from sqlalchemy import create_engine, text
+def post(headers):
+    body = json.dumps({'session_id': 'smoke', 'message': 'проверка'}).encode()
+    request = u.Request('http://127.0.0.1:8000/turn', data=body,
+                        headers={'Content-Type': 'application/json', **headers})
+    try:
+        with u.urlopen(request, timeout=10) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as error:
+        return error.code, {}
+if post({})[0] != 401:
+    sys.exit('ход без X-User-ID не отклонён кодом 401')
+if post({'X-User-ID': 'smoke-nobody'})[0] != 401:
+    sys.exit('ход неизвестного пользователя не отклонён кодом 401')
+with create_engine(os.environ['DATABASE_URL']).connect() as c:
+    user = c.scalar(text('select user_id from app.users order by 1 limit 1'))
+status, reply = post({'X-User-ID': user})
+if status != 200 or reply.get('outcome') != 'error' or 'usage' not in reply:
+    sys.exit('ход без модели не дал ответ по контракту с outcome: error')
+" || fail "ход через API не в том состоянии"
 
 step "сервис и заглушка отвечают внутри сети"
 case "$(fetch http://127.0.0.1:8000/healthz)" in *'"ok"'*) ;; *) fail "сервис не готов" ;; esac

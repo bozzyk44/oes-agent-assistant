@@ -13,6 +13,8 @@ _GRANTS = (
     "grant usage on schema app, dwh, kb to {role}",
     "grant select on app.users, app.user_groups, app.kpi_grants, app.repair_grants,"
     " app.dataset_version to {role}",
+    # Версия схемы — для проверки готовности: сервис не отвечает «готов» на чужой схеме.
+    "grant select on public.alembic_version to {role}",
     "grant select, insert, update on app.sessions, app.actions to {role}",
     "grant select, insert on app.turns, app.messages to {role}",
     "grant select on dwh.production, dwh.downtime, dwh.equipment, kb.chunks to {role}",

@@ -89,6 +89,10 @@ services:
       MODEL_API_KEY: ${MODEL_API_KEY:-}
       MODEL_NAME: ${MODEL_NAME:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      # Пустые значения — умолчания сервиса.
+      MAX_MESSAGE_CHARS: ${MAX_MESSAGE_CHARS:-}
+      TURN_TIMEOUT_SECONDS: ${TURN_TIMEOUT_SECONDS:-}
+      SESSION_LEASE_SECONDS: ${SESSION_LEASE_SECONDS:-}
     ports:
       - "${SERVICE_BIND:-127.0.0.1}:${SERVICE_PORT:-8000}:8000"
     extra_hosts:
