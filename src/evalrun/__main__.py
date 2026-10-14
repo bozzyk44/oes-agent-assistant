@@ -69,6 +69,14 @@ def run(env: Mapping[str, str]) -> int:
             f"прогон: попытка {attempt} {qid} {'+' if ok else '-'}", flush=True
         ),
     )
+    if runner.toir.count() is None:
+        # До первого вызова модели: без счёта заявок проверка «новой заявки нет» невозможна,
+        # и платный прогон ушёл бы впустую.
+        print(
+            "прогон: заглушка ТОиР не отвечает на GET /requests — проверьте TOIR_URL и TOIR_TOKEN",
+            file=sys.stderr,
+        )
+        return 1
     run_id = new_run_id()
     plan = Plan(
         run_id=run_id,

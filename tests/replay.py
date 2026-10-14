@@ -75,6 +75,7 @@ class ReplayModel:
     # Вопрос → ответы модели по порядку вызовов, по одному списку на каждую попытку.
     turns: dict[str, list[list[ModelReply]]] = field(default_factory=dict)
     requests: list[ChatRequest] = field(default_factory=list)
+    _current: dict[str, tuple[list[ModelReply], int]] = field(default_factory=dict)
 
     @classmethod
     def from_results(cls, path: Path) -> ReplayModel:
@@ -83,23 +84,43 @@ class ReplayModel:
     @classmethod
     def from_turns(cls, turns: list[dict[str, Any]]) -> ReplayModel:
         model = cls()
+        owners: dict[str, str] = {}
         for turn in turns:
+            text, qid = turn["question"]["question"], turn["question"]["id"]
+            if owners.setdefault(text, qid) != qid:
+                raise ValueError(f"один текст у вопросов {owners[text]} и {qid}: не различить")
             replies = [_reply(call, number) for number, call in enumerate(turn["calls"])]
-            model.turns.setdefault(turn["question"]["question"], []).append(replies)
+            model.turns.setdefault(text, []).append(replies)
         return model
 
     def complete(self, request: ChatRequest) -> ModelReply:
+        """Первый вызов хода берёт следующую записанную попытку этого вопроса; вызов сверх
+        записанного или записанная попытка, проигранная не до конца, — расхождение, тест
+        падает, а не повторяет последний ответ."""
         self.requests.append(request)
         messages = list(request.messages)
         last_user = max(i for i, m in enumerate(messages) if m["role"] == "user")
         question = str(messages[last_user]["content"]).rsplit("\n\n", 1)[-1]
         number = sum(1 for m in messages[last_user:] if m["role"] == "assistant")
-        attempts = self.turns[question]
-        replies = attempts[0]
-        if number == len(replies) - 1 and len(attempts) > 1:
-            # Последний вызов этой попытки: следующая попытка берёт свою запись.
-            attempts.pop(0)
-        return replies[min(number, len(replies) - 1)]
+        if number == 0:
+            current = self._current.get(question)
+            if current is not None and current[1] < len(current[0]):
+                raise AssertionError(f"ход «{question}» кончился раньше записанного")
+            if not self.turns.get(question):
+                raise AssertionError(f"нет записанной попытки для «{question}»")
+            self._current[question] = (self.turns[question].pop(0), 0)
+        replies, used = self._current[question]
+        if number >= len(replies):
+            raise AssertionError(f"ход «{question}» просит вызов {number + 1} сверх записанных")
+        self._current[question] = (replies, max(used, number + 1))
+        return replies[number]
+
+    def assert_done(self) -> None:
+        """Все записанные попытки проиграны до конца."""
+        left = {question: len(items) for question, items in self.turns.items() if items}
+        unfinished = [q for q, (replies, used) in self._current.items() if used < len(replies)]
+        assert not left, f"не проиграны попытки: {left}"
+        assert not unfinished, f"ходы кончились раньше записанного: {unfinished}"
 
 
 if __name__ == "__main__":

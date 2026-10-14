@@ -30,6 +30,9 @@ def urllib_transport(timeout: float) -> Transport:
                 return response.status, _json(response.read())
         except urllib.error.HTTPError as error:
             return error.code, _json(error.read())
+        except (urllib.error.URLError, OSError) as error:
+            # Сбой сети или предел времени — провал одной попытки, а не всего прогона.
+            return 0, {"error": type(error).__name__}
 
     return send
 

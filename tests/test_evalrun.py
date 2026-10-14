@@ -42,6 +42,25 @@ def test_strings_match_by_the_task_rules(haystack: str, needle: str) -> None:
 def test_spaces_and_commas_only_between_digits() -> None:
     assert normalize("а, б 1 2,5") == "а, б 12.5"
     assert not contains("перечень: 3, 4", "3.4")
+    # Перевод строки — не пробел: ячейки таблицы не склеиваются в одно число.
+    assert not contains("5\n6", "56")
+
+
+def test_replay_fails_loudly_on_desync() -> None:
+    from assistant.model import ChatRequest
+    from tests.replay import ReplayModel
+
+    question = {"id": "x", "question": "Вопрос?"}
+    turn = {"question": question, "calls": [{"content": "ответ", "tool_calls": []}]}
+    model = ReplayModel.from_turns([turn])
+    request = ChatRequest(({"role": "user", "content": "Вопрос?"},), ())
+    model.complete(request)
+    model.assert_done()
+    longer = ChatRequest((*request.messages, {"role": "assistant", "content": ""}), ())
+    with pytest.raises(AssertionError, match="сверх"):
+        model.complete(longer)
+    with pytest.raises(ValueError, match="один текст"):
+        ReplayModel.from_turns([turn, {**turn, "question": {**question, "id": "y"}}])
 
 
 # --- Проверки контракта ------------------------------------------------------------------
@@ -108,6 +127,26 @@ def test_action_params_must_match() -> None:
     checks = _verdict(question, _response(outcome="action", pending_action=bad))
     reasons = {item.name: item.reason for item in checks if not item.passed}
     assert "priority" in reasons["action"]
+
+
+def test_unreachable_toir_is_not_a_pass() -> None:
+    checks = check(_question(), 200, _response(), None, None)
+    toir = next(item for item in checks if item.name == "toir")
+    assert not toir.passed and "не проверено" in toir.reason
+
+
+def test_network_failure_fails_one_attempt_not_the_run() -> None:
+    import urllib.error
+    from unittest import mock
+
+    from evalrun.api import urllib_transport
+
+    send = urllib_transport(1.0)
+    with mock.patch("urllib.request.urlopen", side_effect=urllib.error.URLError("сеть")):
+        status, body = send("POST", "http://assistant:8000/turn", {}, {})
+    assert status == 0 and body == {"error": "URLError"}
+    checks = check(_question(), status, body, 0, 0)
+    assert [(item.name, item.reason) for item in checks] == [("http", "сервис не ответил")]
 
 
 def test_new_toir_request_without_confirmation_fails() -> None:
@@ -273,6 +312,14 @@ def test_compare_requires_exactly_one_differing_field(tmp_path: Path) -> None:
     assert "Отличается поле `model`" in text
     assert "Стабильно проходят только в А: q1." in text
     assert "Стабильно проходят только в Б: q2." in text
+    # Цены и коммит фактором не считаются: смена модели с её ценами и правка промпта
+    # новым коммитом сравниваются.
+    priced = _results(tmp_path / "p.jsonl", {**base, "model": "m2", "prices": {"input": 1.0}}, [])
+    assert "Отличается поле `model`" in compare(a, priced)
+    prompt = _results(tmp_path / "h.jsonl", {**base, "prefix_hash": "y", "commit": "c2"}, [])
+    assert "Отличается поле `prefix_hash`" in compare(a, prompt)
+    code = _results(tmp_path / "k.jsonl", {**base, "commit": "c3"}, [])
+    assert "Отличается поле `commit`" in compare(a, code)
     c = _results(tmp_path / "c.jsonl", {**base, "model": "m2", "prefix_hash": "x"}, [])
     with pytest.raises(NotComparable, match="model, prefix_hash"):
         compare(a, c)
@@ -448,11 +495,14 @@ def test_recorded_real_model_turns_replay_in_ci(database: Any, tmp_path: Path) -
     database.load(root, fresh=True)
     with database.owner.begin() as connection:
         loaded = connection.scalar(text("select content_hash from app.dataset_version"))
-    if loaded != config["dataset_hash"]:
-        pytest.skip("набор изменился после записи прогона: нужен новый платный прогон")
+    # Набор изменился после записи — записанные ходы устарели. Тест падает, а не
+    # пропускается: иначе гарантия молча исчезла бы. Обновление — в TESTING.md.
+    assert loaded == config["dataset_hash"], "набор изменился: перезапишите записанные ходы"
     attempts = max(turn["attempt"] for turn in turns)
     out = tmp_path / "eval" / "results.jsonl"
-    _run(database, ReplayModel.from_turns(turns), root / "questions.jsonl", out, attempts)
+    replay = ReplayModel.from_turns(turns)
+    _run(database, replay, root / "questions.jsonl", out, attempts)
+    replay.assert_done()
     _, replayed = read(out)
     got = {(line["question"]["id"], line["attempt"]): line for line in replayed}
     for turn in turns:

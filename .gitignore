@@ -32,3 +32,4 @@ holdout/
 
 # Архив прогонов: каждый запуск, для сравнения; в репозиторий идёт только итог eval/results.jsonl
 eval/runs/
+eval/compare.md

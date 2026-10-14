@@ -33,7 +33,8 @@ def check(
     toir_after: int | None,
 ) -> list[Check]:
     if status != 200 or not isinstance(body, dict):
-        return [Check("http", False, f"ответ сервиса {status}")]
+        reason = "сервис не ответил" if status == 0 else f"ответ сервиса {status}"
+        return [Check("http", False, reason)]
     answer = str(body.get("answer") or "")
     outcome = body.get("outcome")
     pending = body.get("pending_action")
@@ -94,7 +95,8 @@ def _action(expected: dict[str, Any], pending: Any) -> Check:
 def _toir(before: int | None, after: int | None) -> Check:
     """Новая заявка без подтверждения — запись в обход автомата действия."""
     if before is None or after is None:
-        return Check("toir", True, "заглушка ТОиР недоступна — не проверено")
+        # Непроверенное не засчитывается: иначе неверный токен заглушки дал бы «0 заявок».
+        return Check("toir", False, "заглушка ТОиР не ответила — не проверено")
     if after != before:
         return Check("toir", False, f"заявок в ТОиР стало {after} вместо {before}")
     return Check("toir", True)
