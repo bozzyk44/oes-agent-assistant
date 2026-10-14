@@ -70,8 +70,10 @@ def resolve_outcome(
     if refusal_signal:
         return Verdict("refusal" if proposed in ("refusal", "no_data") else "answer", 4)
     if proposed == "refusal":
+        # `not_found` — тоже законное «данных нет»: такого документа или оборудования нет.
         reached = any(
-            call.tool in DATA_TOOLS and call.status in (Status.OK, Status.EMPTY) for call in calls
+            call.tool in DATA_TOOLS and call.status in (Status.OK, Status.EMPTY, Status.NOT_FOUND)
+            for call in calls
         )
         return Verdict("no_data" if reached else "refusal", 5)
     if proposed == "no_data":

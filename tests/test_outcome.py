@@ -87,7 +87,7 @@ def test_row_4_refusal_signal_with_used_data(
         ([], "refusal"),
         ([ToolStatus(CALCULATE, Status.OK)], "refusal"),
         ([ToolStatus(SEARCH, Status.INVALID)], "refusal"),
-        ([ToolStatus(KPI, Status.NOT_FOUND)], "refusal"),
+        ([ToolStatus(KPI, Status.NOT_FOUND)], "no_data"),
         ([ToolStatus(KPI, Status.EMPTY)], "no_data"),
         ([ToolStatus(SEARCH, Status.OK)], "no_data"),
     ],

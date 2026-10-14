@@ -25,7 +25,7 @@ from sqlalchemy import (
 )
 
 from assistant.access.equipment import equipment_sites, normalize
-from assistant.access.grants import Grants
+from assistant.access.grants import Grants, site_key
 from assistant.access.status import Status
 from assistant.db import models
 
@@ -112,6 +112,10 @@ def query_rows(connection: Connection, grants: Grants, query: KpiQuery) -> KpiRe
     scope = granted
     denied_sites: tuple[str, ...] = ()
     if named_sites is not None:
+        try:
+            named_sites = _canonical_sites(grants, granted, named_sites)
+        except _Invalid as error:
+            return KpiResult(Status.INVALID, problem=str(error))
         denied_sites = tuple(sorted(named_sites - granted))
         scope = granted & named_sites
         if not scope:
@@ -147,6 +151,20 @@ def query_rows(connection: Connection, grants: Grants, query: KpiQuery) -> KpiRe
         missing_equipment=missing_equipment,
         truncated=len(rows) > limit,
     )
+
+
+def _canonical_sites(
+    grants: Grants, granted: frozenset[str], named: frozenset[str]
+) -> frozenset[str]:
+    """Названные участки — к кодам приложения. Отказ — только для существующего чужого
+    кода: опечатка или название вместо кода — неверный аргумент, а не чужой участок.
+    """
+    codes = {site_key(code): code for code in grants.known_sites | granted}
+    unknown = sorted(site for site in named if site_key(site) not in codes)
+    if unknown:
+        own = ", ".join(sorted(granted))
+        raise _Invalid(f"filters: нет участка с кодом {unknown[0]!r}; ваши участки: {own}")
+    return frozenset(codes[site_key(site)] for site in named)
 
 
 def _limit(value: object) -> int:

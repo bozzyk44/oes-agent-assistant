@@ -4,6 +4,7 @@
 ловушек. Ожидание считается из файлов набора, а не из знания о нём.
 """
 
+import ast
 import csv
 import json
 import re
@@ -130,6 +131,7 @@ def test_service_code_knows_nothing_of_the_dataset() -> None:
         identifiers |= {doc.doc_id for doc in world.docs.values()}
         identifiers |= {user.user_id for user in world.users}
         identifiers |= {item.equipment_id for item in world.equipment}
+        identifiers |= {site for user in world.users for site in user.repair_requests}
     pattern = re.compile(
         r"(?<![\w-])(" + "|".join(map(re.escape, sorted(identifiers))) + r")(?![\w-])"
     )
@@ -143,15 +145,54 @@ def test_service_code_knows_nothing_of_the_dataset() -> None:
     assert found == []
 
 
+# Таблицы набора в моделях и всё, что даёт к ним доступ в обход прав.
+_DATASET_MODELS = frozenset({"Production", "Downtime", "Equipment", "Chunk", "Document"})
+_ACCESS_INTERNALS = frozenset({"TABLES"})
+
+
+def _dataset_references(tree: ast.AST) -> list[tuple[int, str]]:
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            names = {alias.name for alias in node.names}
+            if node.module == "assistant.db.models" and names & (_DATASET_MODELS | {"*"}):
+                found.append((node.lineno, f"импорт из {node.module}"))
+            if node.module.startswith("assistant.access.") and names & _ACCESS_INTERNALS:
+                found.append((node.lineno, f"импорт внутренностей {node.module}"))
+        elif isinstance(node, ast.Attribute) and node.attr in _DATASET_MODELS:
+            found.append((node.lineno, f"обращение к .{node.attr}"))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if re.search(r"\b(dwh|kb)\.\w", node.value):
+                found.append((node.lineno, "таблица набора в тексте запроса"))
+    return found
+
+
 def test_only_access_layer_reads_dataset_tables() -> None:
-    # Инструменты и цикл хода получают данные набора только через `access/`.
-    pattern = re.compile(r"\b(dwh|kb)\.\w|models\.(Production|Downtime|Equipment|Chunk|Document)\b")
+    # Инструменты и цикл хода получают данные набора только через `access/`: ни моделей
+    # таблиц набора, ни текста запроса к схемам `dwh` и `kb` вне него.
     allowed = ("access/", "db/", "ingest/")
     found = [
-        f"{path.relative_to(SOURCE)}:{number}"
+        f"{path.relative_to(SOURCE)}:{line}: {what}"
         for path in sorted(SOURCE.rglob("*.py"))
         if not path.relative_to(SOURCE).as_posix().startswith(allowed)
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
-        if pattern.search(line)
+        for line, what in _dataset_references(ast.parse(path.read_text(encoding="utf-8")))
     ]
     assert found == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from assistant.db.models import Downtime",
+        "from assistant.db import models\nmodels.Chunk",
+        "from assistant.access.kpi import TABLES",
+        "q = text('select * from dwh.production')",
+    ],
+)
+def test_dataset_reference_check_catches_bypass(source: str) -> None:
+    # Проверка выше не должна оставаться зелёной при обходе слоя доступа.
+    assert _dataset_references(ast.parse(source))
+
+
+def test_dataset_reference_check_allows_own_tables() -> None:
+    assert _dataset_references(ast.parse("from assistant.db import models\nmodels.Turn")) == []

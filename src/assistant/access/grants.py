@@ -16,6 +16,17 @@ _USER = text("select name, position_title from app.users where user_id = :user_i
 _GROUPS = text("select group_name from app.user_groups where user_id = :user_id")
 _KPI = text("select table_name, site from app.kpi_grants where user_id = :user_id")
 _REPAIR = text("select site from app.repair_grants where user_id = :user_id")
+# Коды участков набора — из полномочий всех пользователей: это формат, а не содержимое.
+_SITES = text("select site from app.kpi_grants union select site from app.repair_grants")
+
+# Кириллические буквы, неотличимые на письме от латинских: модель переносит код участка
+# из русского вопроса и пишет кириллическую «К» вместо латинской.
+_LOOKALIKES = str.maketrans("АВЕКМНОРСТУХ", "ABEKMHOPCTYX")
+
+
+def site_key(site: str) -> str:
+    """Код участка для сравнения: без крайних пробелов, регистра и похожих букв."""
+    return site.strip().upper().translate(_LOOKALIKES)
 
 
 @dataclass(frozen=True)
@@ -28,6 +39,8 @@ class Grants:
     kpi: dict[str, frozenset[str]] = field(default_factory=dict)
     # Участки, на оборудование которых можно оформить заявку.
     repair_sites: frozenset[str] = frozenset()
+    # Все коды участков, известные приложению; по ним названный участок приводится к коду.
+    known_sites: frozenset[str] = frozenset()
 
     @property
     def doc_groups(self) -> list[str]:
@@ -54,4 +67,5 @@ def load_grants(connection: Connection, user_id: str) -> Grants | None:
         groups=frozenset(connection.scalars(_GROUPS, params)),
         kpi={table: frozenset(sites) for table, sites in kpi.items()},
         repair_sites=frozenset(connection.scalars(_REPAIR, params)),
+        known_sites=frozenset(connection.scalars(_SITES)),
     )

@@ -254,6 +254,38 @@ def test_mixed_sites_give_own_data_and_list_denied(connect: Barrier) -> None:
     assert result.partially_denied
 
 
+@pytest.mark.parametrize("written", ["K1", " k1 ", "К1", "к1"])
+def test_site_code_is_matched_regardless_of_case_space_and_lookalike_letters(
+    connect: Barrier, written: str
+) -> None:
+    # Модель переносит код из русского вопроса: кириллическая «К1» — свой участок, а не чужой.
+    with _open(connect, "u-k1") as (connection, grants):
+        result = query_rows(
+            connection, grants, KpiQuery("production", (Filter("site", "eq", written),))
+        )
+    assert (result.status, result.sites, result.denied_sites) == (Status.OK, ("K1",), ())
+
+
+@pytest.mark.parametrize("written", ["К2", "k2"])
+def test_foreign_site_written_differently_is_still_denied(connect: Barrier, written: str) -> None:
+    with _open(connect, "u-k1") as (connection, grants):
+        result = query_rows(
+            connection, grants, KpiQuery("production", (Filter("site", "eq", written),))
+        )
+    assert result.status is Status.DENIED
+
+
+def test_unknown_site_code_is_invalid_not_denied(connect: Barrier) -> None:
+    # Название вместо кода или опечатка — неверный аргумент: модель исправит его,
+    # а не откажет пользователю в его собственном участке.
+    with _open(connect, "u-k1") as (connection, grants):
+        result = query_rows(
+            connection, grants, KpiQuery("production", (Filter("site", "eq", "Карьер-1"),))
+        )
+    assert result.status is Status.INVALID
+    assert "K1" in result.problem
+
+
 def test_kpi_comparisons_narrow_within_grants(connect: Barrier) -> None:
     with _open(connect, "u-eng") as (connection, grants):
         result = query_rows(
