@@ -48,10 +48,19 @@ def test_anything_but_arithmetic_is_refused(text: str) -> None:
         evaluate(text)
 
 
-def test_nesting_is_bounded() -> None:
-    depth = MAX_DEPTH + 5
+def test_unary_nesting_is_bounded() -> None:
     with pytest.raises(BadExpression):
-        evaluate("(" * depth + "1" + ")" * depth + "+" + "-" * depth + "1")
+        evaluate("-" * (MAX_DEPTH + 5) + "1")
+
+
+def test_long_sum_is_bounded_by_depth() -> None:
+    # Цепочка сложений короче предела длины, но глубже предела дерева.
+    terms = MAX_DEPTH + 5
+    text = "+".join(["1"] * terms)
+    assert len(text) <= 300
+    with pytest.raises(BadExpression):
+        evaluate(text)
+    assert evaluate("+".join(["1"] * 40)) == 40
 
 
 def test_division_by_zero_is_an_arithmetic_error() -> None:
