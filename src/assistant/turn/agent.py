@@ -389,7 +389,9 @@ class AgentHandler:
             key = canonical([call.name, _arguments_key(call.arguments)])
             if key in state.calls:
                 results[call.call_id] = envelope(Status.OK, note=REPEATED)
-                call_record["tool_calls"].append({"name": call.name, "repeated": True})
+                call_record["tool_calls"].append(
+                    {"name": call.name, "arguments": call.arguments, "repeated": True}
+                )
                 continue
             result = box.run(call.name, call.arguments)
             state.calls[key] = result
@@ -417,7 +419,9 @@ class AgentHandler:
             results[call.call_id] = result.content
         for call in plan.skipped:
             results[call.call_id] = envelope(Status.INVALID, note=NOT_EXECUTED)
-            call_record["tool_calls"].append({"name": call.name, "skipped": True})
+            call_record["tool_calls"].append(
+                {"name": call.name, "arguments": call.arguments, "skipped": True}
+            )
         for call in reply.tool_calls:
             state.turn.append(
                 {"role": "tool", "tool_call_id": call.call_id, "content": results[call.call_id]}

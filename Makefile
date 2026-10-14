@@ -12,7 +12,7 @@ HOST_USER := $(shell id -u):$(shell id -g)
 # Коммит для GET /info; вне рабочей копии git — пусто.
 export GIT_COMMIT ?= $(shell git describe --always --dirty 2>/dev/null)
 
-.PHONY: help env data data-holdout run migrate migrate-check down reset test eval smoke ci lock
+.PHONY: help env data data-holdout run migrate migrate-check down reset test eval eval-report eval-compare smoke ci lock
 
 help:
 	@echo "make data   — сгенерировать набор в data/"
@@ -21,7 +21,9 @@ help:
 	@echo "make down   — остановить; том базы остаётся"
 	@echo "make reset  — остановить и удалить том базы"
 	@echo "make test   — линтер, типы и тесты, без сети и модели"
-	@echo "make eval   — прогон эталонных вопросов по запущенному сервису; QUESTIONS=<путь>"
+	@echo "make eval   — прогон эталонных вопросов по запущенному сервису; QUESTIONS=<путь>, EVAL_ATTEMPTS=<число>"
+	@echo "make eval-report — пересобрать eval/report.md из eval/results.jsonl без сервиса"
+	@echo "make eval-compare A=<прогон> B=<прогон> — сравнить два прогона попарно по вопросам"
 	@echo "make migrate — применить миграции к базе текущего запуска; повтор ничего не меняет"
 	@echo "make migrate-check — проверка миграций: пустая база, повтор, откат и снова, сверка моделей"
 	@echo "make smoke  — сценарий сборки: поднять всё с нуля и проверить связку"
@@ -83,6 +85,14 @@ eval: env
 		export QUESTIONS_DIR QUESTIONS_FILE; \
 	fi; \
 	$(COMPOSE) --profile tools run --rm --build --user $(HOST_USER) evalrun $(EVAL_ARGS)
+
+# Отчёт из eval/results.jsonl без обращения к сервису и сравнение двух прогонов из eval/.
+eval-report: env
+	$(COMPOSE) --profile tools run --rm --no-deps --user $(HOST_USER) evalrun python -m evalrun report
+
+eval-compare: env
+	@test -n "$(A)" -a -n "$(B)" || { echo 'нужно: make eval-compare A=eval/runs/<первый>.jsonl B=eval/runs/<второй>.jsonl'; exit 2; }
+	$(COMPOSE) --profile tools run --rm --no-deps --user $(HOST_USER) evalrun python -m evalrun compare /app/$(A) /app/$(B)
 
 smoke: env
 	@COMPOSE='$(COMPOSE_SMOKE)' SMOKE_PROJECT='$(COMPOSE_PROJECT)-smoke' MAKE='$(MAKE)' sh scripts/smoke.sh
