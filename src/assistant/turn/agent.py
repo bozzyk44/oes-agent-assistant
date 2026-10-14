@@ -32,7 +32,7 @@ from assistant.tools.box import ToolBox, ToolResult, envelope
 from assistant.turn.calls import NOT_EXECUTED, plan_calls
 from assistant.turn.context import actions_block, build_messages, load_history, user_info
 from assistant.turn.outcome import ToolStatus, resolve_outcome
-from assistant.turn.parse import parse_final
+from assistant.turn.parse import parse_final, strip_thinking
 from assistant.turn.prefix import PREFIX, Prefix, canonical
 from assistant.turn.runner import (
     CitationRef,
@@ -143,7 +143,8 @@ class AgentHandler:
                     "output_tokens": usage.output_tokens,
                     "cached_input_tokens": usage.cached_input_tokens,
                 },
-                "content": reply.content,
+                "content": strip_thinking(reply.content or ""),
+                "truncated": reply.truncated,
                 "tool_calls": [],
             }
             state.record["calls"].append(call_record)
@@ -156,17 +157,17 @@ class AgentHandler:
             if reply.tool_calls:
                 # Запрет инструментов нарушен: вызов не выполняется.
                 state.record["tool_calls_after_ban"] = [call.name for call in reply.tool_calls]
-            return self._finish(context, state, reply, at_limit=last)
+            # Оборванный ответ итогом не считается: его текст — обрубок.
+            return self._finish(context, state, None if reply.truncated else reply, at_limit=last)
         return self._finish(context, state, None, at_limit=True)
 
     def _request(self, messages: list[dict[str, Any]], last: bool) -> ChatRequest:
-        enforce = not self._format_disabled and (
-            self._format_mode == "all" or (self._format_mode == "last" and last)
-        )
+        strict = not self._format_disabled
+        enforce = strict and (self._format_mode == "all" or (self._format_mode == "last" and last))
         return ChatRequest(
             messages=tuple(messages),
             tools=self._prefix.tools,
-            tool_choice="none" if last else "auto",
+            tool_choice=("none" if strict else None) if last else "auto",
             response_format=ANSWER_SCHEMA if enforce else None,
         )
 
@@ -174,12 +175,15 @@ class AgentHandler:
         try:
             return self._model.complete(request)
         except FormatRejected:
-            log.warning("сервер модели отверг параметр формата ответа; принуждение выключено")
-            self._format_disabled = True
+            # Повтор без строгих параметров. Выключаются они, только если повтор прошёл:
+            # иначе отказ был по другой причине — длина входа, шаблон чата.
             state.record["format_rejected"] = True
-            return self._model.complete(
-                ChatRequest(request.messages, request.tools, request.tool_choice, None)
-            )
+            plain = ChatRequest(request.messages, request.tools, None, None)
+            reply = self._model.complete(plain)
+            if not self._format_disabled:
+                log.warning("сервер модели отверг строгие параметры; принуждение выключено")
+            self._format_disabled = True
+            return reply
 
     def _run_tools(
         self, reply: ModelReply, box: ToolBox, state: _State, call_record: dict[str, Any]

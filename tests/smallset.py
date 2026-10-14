@@ -43,7 +43,8 @@ DOCS = {
     "A1": ["all"],
     "H1": ["hr"],
     "R1": ["engineering", "site-k1"],
-    "R2": ["engineering", "site-k1"],
+    # Действующая редакция открыта шире прежней: финансисту прежняя не видна.
+    "R2": ["engineering", "site-k1", "finance"],
 }
 
 PRODUCTION = [

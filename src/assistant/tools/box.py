@@ -11,7 +11,7 @@ import json
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from decimal import Decimal, DivisionByZero, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
 from pydantic import ValidationError
@@ -224,9 +224,12 @@ def _calculate(args: CalculateArgs) -> ToolResult:
             case _:
                 note = f"{args.operation}: нужны ровно два числа"
                 return ToolResult(Status.INVALID, envelope(Status.INVALID, note=note))
-    except DivisionByZero, InvalidOperation:
+        result = _number(round_half_up(value, args.decimals))
+    except ZeroDivisionError:
         return ToolResult(Status.INVALID, envelope(Status.INVALID, note="деление на ноль"))
-    result = _number(round_half_up(value, args.decimals))
+    except ArithmeticError:
+        note = "результат вне точности расчёта"
+        return ToolResult(Status.INVALID, envelope(Status.INVALID, note=note))
     return ToolResult(Status.OK, envelope(Status.OK, {"result": result}))
 
 

@@ -50,7 +50,8 @@ class OpenAICompatibleClient:
         }
         if request.tools:
             arguments["tools"] = list(request.tools)
-            arguments["tool_choice"] = request.tool_choice
+            if request.tool_choice is not None:
+                arguments["tool_choice"] = request.tool_choice
         if request.response_format is not None:
             arguments["response_format"] = request.response_format
         if self._extra_body:
@@ -58,8 +59,8 @@ class OpenAICompatibleClient:
         try:
             response = self._client.chat.completions.create(**arguments)
         except (openai.BadRequestError, openai.UnprocessableEntityError) as error:
-            if request.response_format is not None:
-                # Отказ из-за параметра формата: сервер не запускал модель.
+            if request.response_format is not None or request.tool_choice == "none":
+                # Возможно, отказ из-за строгого параметра: сервер не запускал модель.
                 raise FormatRejected(type(error).__name__) from None
             raise ModelError(f"сервер модели отклонил запрос: {error.status_code}") from None
         except (
@@ -78,13 +79,19 @@ class OpenAICompatibleClient:
 def _reply(response: Any) -> ModelReply:
     if not response.choices:
         raise ModelError("в ответе модели нет вариантов")
-    message = response.choices[0].message
+    choice = response.choices[0]
+    message = choice.message
     calls = tuple(
         ToolCall(call.id or f"call-{number}", call.function.name, call.function.arguments or "")
         for number, call in enumerate(message.tool_calls or [])
         if getattr(call, "function", None) is not None
     )
-    return ModelReply(content=message.content, tool_calls=calls, usage=_usage(response.usage))
+    return ModelReply(
+        content=message.content,
+        tool_calls=calls,
+        usage=_usage(response.usage),
+        truncated=getattr(choice, "finish_reason", None) == "length",
+    )
 
 
 def _usage(usage: Any) -> UsageReport:

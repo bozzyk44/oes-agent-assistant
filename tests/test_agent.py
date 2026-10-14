@@ -10,7 +10,13 @@ import pytest
 from sqlalchemy import text
 
 from assistant.access import Status
-from assistant.model import FormatRejected, ModelReply, ToolCall, TransientModelError
+from assistant.model import (
+    FormatRejected,
+    ModelError,
+    ModelReply,
+    ToolCall,
+    TransientModelError,
+)
 from assistant.tools.schemas import CALCULATE, DOCUMENT, KPI, REPAIR, SEARCH
 from assistant.turn.agent import MAX_CALLS, AgentHandler
 from assistant.turn.prefix import PREFIX
@@ -259,9 +265,45 @@ def test_format_rejection_retries_without_format_and_is_not_counted(
     assert _usage(reply)["model_calls"] == MAX_CALLS
     assert model.requests[3].response_format is not None
     assert model.requests[4].response_format is None
-    # Принуждение выключено для следующих ходов.
+    assert (model.requests[3].tool_choice, model.requests[4].tool_choice) == ("none", None)
+    # Повтор прошёл — строгие параметры выключены для следующих ходов.
     service.turn("u-eng", new_session(), "Вопрос")
     assert all(request.response_format is None for request in model.requests[5:])
+    assert model.requests[-1].tool_choice is None
+
+
+def test_rejection_for_another_reason_keeps_strict_parameters(
+    database: Database, small: Path
+) -> None:
+    # Отказ не из-за строгих параметров: повтор без них тоже отвергнут.
+    model = ScriptedModel(
+        [
+            tools(call(SEARCH, query="a")),
+            tools(call(SEARCH, query="b")),
+            tools(call(SEARCH, query="c")),
+            FormatRejected("BadRequestError"),
+            ModelError("сервер модели отклонил запрос: 400"),
+            tools(call(SEARCH, query="d")),
+            tools(call(SEARCH, query="e")),
+            tools(call(SEARCH, query="f")),
+            final("второй"),
+        ]
+    )
+    service, _ = _service(database, model)
+    assert service.turn("u-eng", new_session(), "Вопрос").body["outcome"] == "error"
+    second = service.turn("u-eng", new_session(), "Вопрос")
+    assert second.body["answer"] == "второй"
+    assert model.requests[-1].response_format is not None
+    assert model.requests[-1].tool_choice == "none"
+
+
+def test_truncated_reply_is_not_a_final_answer(database: Database, small: Path) -> None:
+    cut = ModelReply('{"outcome": "answer", "answer": "Через 7', (), truncated=True)
+    model = ScriptedModel([cut])
+    service, _ = _service(database, model)
+    reply = service.turn("u-eng", new_session(), "Вопрос")
+    assert reply.body["outcome"] == "error"
+    assert "Через 7" not in str(reply.body["answer"])
 
 
 def test_transient_error_is_retried_once_and_counted(database: Database, small: Path) -> None:
@@ -408,7 +450,7 @@ def _tool(database: Database, user: str, name: str, **arguments: Any) -> dict[st
 @pytest.mark.parametrize(
     ("operation", "numbers", "decimals", "expected"),
     [
-        ("percent", [61777, 64120], 1, "96.3"),
+        ("percent", [7, 9], 1, "77.8"),
         ("ratio", [1, 3], 2, "0.33"),
         ("difference", [10, 2.5], 1, "7.5"),
         ("sum", [1, 2, 3], 0, 6),
@@ -437,6 +479,12 @@ def test_calculate_refuses_bad_input(database: Database, small: Path) -> None:
     assert (
         _tool(database, "u-eng", CALCULATE, operation="percent", numbers=[1])["status"] == "invalid"
     )
+    # 0/0 и результат вне точности расчёта — тоже `invalid`, а не обрыв хода.
+    for numbers, decimals in (([0, 0], 1), ([1e30, 1e-30], 6)):
+        result = _tool(
+            database, "u-eng", CALCULATE, operation="ratio", numbers=numbers, decimals=decimals
+        )
+        assert result["status"] == "invalid"
 
 
 def test_downtime_crossing_midnight_is_split_and_clipped(database: Database, small: Path) -> None:

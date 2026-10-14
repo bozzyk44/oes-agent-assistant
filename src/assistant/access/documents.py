@@ -17,9 +17,12 @@ from assistant.ingest.chunks import exact_terms
 # Выдача поиска: фрагмент — не длиннее четверти лимита результата инструмента.
 SEARCH_LIMIT = 4
 
+# Ссылка на прежнюю редакцию — только если она доступна: иначе пометка выдала бы её
+# существование.
 _COLUMNS = (
     "c.chunk_id, c.doc_id, c.title, c.heading, c.doc_date, c.status, c.superseded_by,"
-    " c.body, c.supersedes"
+    " c.body, case when exists (select 1 from kb.chunks p where p.doc_id = c.supersedes"
+    " and p.acl && cast(:groups as text[])) then c.supersedes end as supersedes"
 )
 
 # Слова запроса — через «или»: требование всех слов сразу давало бы пустую выдачу на обычный

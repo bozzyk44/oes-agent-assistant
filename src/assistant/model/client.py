@@ -30,6 +30,8 @@ class ModelReply:
     content: str | None
     tool_calls: tuple[ToolCall, ...] = ()
     usage: UsageReport = field(default_factory=UsageReport)
+    # Ответ оборван по пределу длины: итогом он не считается.
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,8 @@ class ChatRequest:
     messages: tuple[dict[str, Any], ...]
     tools: tuple[dict[str, Any], ...]
     # Запрет инструментов — на последнем вызове хода; схемы при этом остаются во входе.
-    tool_choice: Literal["auto", "none"] = "auto"
+    # `None` — параметр не передаётся: запасной путь для сервера, который его отверг.
+    tool_choice: Literal["auto", "none"] | None = "auto"
     # Требование к формату ответа; не входит в неизменную часть и в `prefix_hash`.
     response_format: dict[str, Any] | None = None
 
@@ -53,7 +56,9 @@ class TransientModelError(ModelError):
 
 
 class FormatRejected(ModelError):
-    """Сервер отверг параметр формата ответа до запуска модели: вход не потрачен."""
+    """Сервер отверг запрос со строгими параметрами — форматом ответа или запретом
+    инструментов — до запуска модели: вход не потрачен. Причина может быть и другой;
+    это выясняет повтор без них."""
 
 
 class ModelClient(Protocol):

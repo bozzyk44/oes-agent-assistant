@@ -33,9 +33,9 @@ class ModelSettings:
     api_key: str = field(repr=False)
     name: str
     # Потолок выхода одного вызова: ограничивает цену и задержку хода.
-    max_output_tokens: int = 1024
+    max_output_tokens: int = 2048
     # Предел времени одного вызова, секунды; сумма по ходу — меньше срока захвата сессии.
-    timeout_seconds: float = 20.0
+    timeout_seconds: float = 45.0
     # Принуждение к формату ответа: только на последнем вызове хода, на всех или выключено.
     response_format: FormatMode = "last"
     # Параметры конкретного провайдера, которых нет в общем протоколе. Значения могут
@@ -136,8 +136,8 @@ def load_settings(env: Mapping[str, str]) -> Settings:
             base_url=env.get("MODEL_BASE_URL", "").strip(),
             api_key=env.get("MODEL_API_KEY", "").strip(),
             name=env.get("MODEL_NAME", "").strip(),
-            max_output_tokens=_count(env, "MODEL_MAX_OUTPUT_TOKENS", 1024),
-            timeout_seconds=_seconds(env, "MODEL_TIMEOUT_SECONDS", 20),
+            max_output_tokens=_count(env, "MODEL_MAX_OUTPUT_TOKENS", 2048),
+            timeout_seconds=_seconds(env, "MODEL_TIMEOUT_SECONDS", 45),
             response_format=_format_mode(env),
             extra_body=_extra_body(env),
         ),
