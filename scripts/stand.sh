@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Стенд в облаке: сервер — Terraform в infra/terraform, сервис — тот же compose, что локально.
 #
-#   scripts/stand.sh up       создать сервер (спросит подтверждение) и развернуть сервис
+#   scripts/stand.sh up [аргументы apply]   создать сервер (спросит подтверждение) и развернуть
 #   scripts/stand.sh deploy   выкатить текущий коммит на уже созданный сервер
 #   scripts/stand.sh down     удалить стенд (спросит подтверждение)
 #
@@ -85,7 +85,7 @@ deploy() {
 case "${1:-}" in
     up)
         "$tf" init -input=false >/dev/null
-        "$tf" apply
+        "$tf" apply "${@:2}"
         # Новый сервер — новый ключ хоста.
         rm -f "$known"
         deploy
