@@ -1,8 +1,10 @@
 # Шаблон запроса для ревью
 
-Запрос пишется по-английски, отчёт запрашивается по-русски. Замени всё в угловых скобках. Постоянная часть и формат отчёта идут в запрос всегда и не сокращаются; блоки проверок бери по таблице из `SKILL.md`, лишние удали.
+Запрос пишется по-английски, отчёт запрашивается по-русски. Замени всё в угловых скобках. Постоянная часть, порядок работы и формат отчёта идут в запрос всегда и не сокращаются; блоки проверок бери по таблице из `SKILL.md`, лишние удали. Если на круге несколько агентов, каждому — свой запрос с разделом «Область агента» и только его блоками.
 
-Оглавление: постоянная часть · добавка для повторного круга · блоки проверок (одиннадцать) · формат отчёта.
+Запрос рассчитан на Sonnet: шаги и запреты сказаны явно, потому что агент не достроит их сам. Не заменяй шаги пересказом своими словами.
+
+Оглавление: постоянная часть · добавка для повторного круга · область агента · порядок работы · блоки проверок (одиннадцать) · формат отчёта.
 
 ## Постоянная часть
 
@@ -62,6 +64,48 @@ A previous round reviewed commit <old sha>. Since then the author made fixes. Yo
 - Also look for new problems introduced by the fixes themselves, and for places the fixes made documents contradict each other.
 
 Report critical and major findings in full, and also anything about public-repository hygiene regardless of severity. List other minor ones as single lines at the end without analysis.
+```
+
+### Область агента
+
+Вставляется в конец постоянной части, когда круг делится между агентами. Списки — из таблицы «Сколько агентов» в `SKILL.md`.
+
+```
+## Your scope
+
+You are one of <N> reviewers working in parallel on the same change; the others cover <their areas in a few words>. Cover ONLY the check blocks given below. Do not report findings outside them, even if you notice them — another reviewer owns that area. Exception: anything about secrets or public-repository hygiene is always in scope.
+
+Read these, in this order, and nothing else unless a specific finding requires it:
+<numbered reading list: diff command(s), then documents with section names>
+```
+
+## Порядок работы
+
+Идёт в запрос всегда, после постоянной части и до блоков проверок.
+
+```
+## How to work
+
+Follow these steps in order.
+
+1. Run `git -C <worktree> diff --stat <base>` to see what changed. Then read the full diff of the files in your scope. For a changed file, read the surrounding code too when the diff alone does not show how a changed function is called.
+2. Read the documents from your reading list. For long documents read only the named sections; use `git grep -n` to find a term instead of reading everything.
+3. Go through your check blocks one item at a time. For each item, either record a finding or record one line saying what you checked and why it holds (file:line).
+4. Before you write a finding down, confirm it: open the file and copy the exact line(s). Construct a concrete scenario — specific input or sequence of events → specific wrong result. If you cannot quote the line or cannot build the scenario, drop the finding or list it under "could not verify"; do not report it as a defect.
+5. Rank findings by severity using the definitions in "How to report". When unsure between major and minor, say major and explain the doubt in one sentence.
+6. Stop when every item of your blocks has a verdict. Do not explore unrelated parts of the repository.
+
+Do not report: wording, formatting, naming and style; suggestions for extra features; problems in code the change did not touch, unless the change relies on that code; anything the context section lists as a deliberate decision.
+
+Known defect patterns in this repository — check the change for each that applies to your scope:
+- ids, names or numbers from data/ written into service code, comments or tool descriptions (the service must work on a different dataset);
+- an access path (search, direct id, aggregate, error message, candidate list, history) that returns data before the access-layer filter, or reveals that a forbidden object exists;
+- a document or comment claiming a check or order of checks that the code does not actually do; a test that stays green if the guarantee it names is removed;
+- a fix applied to the places a previous report listed but not to the same pattern elsewhere (grep for it);
+- comparisons that depend on locale, case, look-alike Cyrillic/Latin letters or separators differently in Python and in SQL;
+- a step that would reach a paid model or cloud resource without the explicit gate.
+
+Keep the report under about 1 500 words. Ten well-supported findings are worth more than thirty guesses.
 ```
 
 ## Блоки проверок
