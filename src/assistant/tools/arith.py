@@ -18,6 +18,7 @@ MAX_LENGTH = 300
 MAX_DEPTH = 100
 _SPACE = re.compile(r"(?<=\d)[ \u00a0\u202f](?=\d)")
 _COMMA = re.compile(r"(?<=\d),(?=\d)")
+NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
 _OPERATORS: dict[type[ast.operator], Callable[[Decimal, Decimal], Decimal]] = {
     ast.Add: operator.add,
@@ -33,17 +34,43 @@ class BadExpression(ValueError):
 
 def evaluate(text: str) -> Decimal:
     """Значение выражения. Деление на ноль — `ZeroDivisionError` или `decimal`-исключение."""
+    return _value(_parse(text), 0)
+
+
+def literals(text: str) -> list[Decimal]:
+    """Числа выражения — те же, что идут в расчёт: `1e5` и `114_300` — одно число каждое,
+    а не несколько групп цифр."""
+    return [
+        _constant(node)
+        for node in ast.walk(_parse(text))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, int | float)
+        and not isinstance(node.value, bool)
+    ]
+
+
+def _parse(text: str) -> ast.expr:
     if not text.strip() or len(text) > MAX_LENGTH:
         raise BadExpression(f"ожидалось непустое выражение до {MAX_LENGTH} символов")
     # Модели пишут знаки по-разному. Пробел между цифрами — разряды, запятая — десятичная:
     # как в сравнении строк прогона.
-    prepared = text.replace("×", "*").replace("÷", "/").replace("−", "-")
-    prepared = _COMMA.sub(".", _SPACE.sub("", prepared))
+    prepared = normalize_digits(text.replace("×", "*").replace("÷", "/").replace("−", "-"))
     try:
         tree = ast.parse(prepared.strip(), mode="eval")
     except SyntaxError:
         raise BadExpression("выражение не разобрано: только числа, + - * / и скобки") from None
-    return _value(tree.body, 0)
+    return tree.body
+
+
+def _constant(node: ast.Constant) -> Decimal:
+    value = node.value
+    return Decimal(value) if isinstance(value, int) else Decimal(ast.unparse(node))
+
+
+def normalize_digits(text: str) -> str:
+    """Пробел между цифрами убирается, запятая между цифрами — точка: как в сравнении строк
+    прогона."""
+    return _COMMA.sub(".", _SPACE.sub("", text))
 
 
 def _value(node: ast.AST, depth: int) -> Decimal:
@@ -52,8 +79,8 @@ def _value(node: ast.AST, depth: int) -> Decimal:
     match node:
         case ast.Constant(value=bool()):
             raise BadExpression("в выражении — не число")
-        case ast.Constant(value=int() | float() as value):
-            return Decimal(ast.unparse(node)) if isinstance(value, float) else Decimal(value)
+        case ast.Constant(value=int() | float()):
+            return _constant(node)
         case ast.UnaryOp(op=ast.USub(), operand=operand):
             return -_value(operand, depth + 1)
         case ast.UnaryOp(op=ast.UAdd(), operand=operand):
