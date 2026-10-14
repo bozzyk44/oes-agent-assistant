@@ -21,7 +21,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import Engine, create_engine, text
 
 log = logging.getLogger(__name__)
@@ -73,6 +73,15 @@ class RepairRequest(BaseModel):
     equipment_id: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1, max_length=10_000)
     priority: int = Field(ge=1, le=3, strict=True)
+
+    @field_validator("equipment_id", "description")
+    @classmethod
+    def storable(cls, value: str) -> str:
+        # Текст, который база не сохранит, — неверный запрос, а не ошибка сервера: иначе
+        # сервис повторял бы его без конца.
+        if "\x00" in value or any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+            raise ValueError("нулевой символ или одиночный суррогат")
+        return value
 
 
 class StoredRequest(BaseModel):
