@@ -35,12 +35,12 @@ data: env
 # Набор для итоговой проверки: промпт настраивается на data/, а проверяется ещё и на наборе
 # с другим зерном, на котором его не подгоняли. В репозиторий он не кладётся: его
 # воспроизводит та же команда.
-HOLDOUT_SEED ?= 7
+# Зерно — HOLDOUT_SEED из src/datagen/world.py; переменная make его переопределяет.
 data-holdout: env
 	mkdir -p holdout
 	$(COMPOSE) --profile tools run --rm --build --user $(HOST_USER) \
 		-v "$(CURDIR)/holdout:/app/holdout" datagen \
-		python -m datagen --seed $(HOLDOUT_SEED) --out holdout
+		python -m datagen --holdout --out holdout $(if $(HOLDOUT_SEED),--seed $(HOLDOUT_SEED))
 
 run: env
 	$(COMPOSE) up --build

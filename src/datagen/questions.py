@@ -18,10 +18,13 @@ from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+import yaml
+
 from datagen.text import fmt_tenths, normalize, tenths_of_hours
 from datagen.world import (
     DAYS,
     EXCAVATOR,
+    KPI_TABLES,
     SHIFTS,
     SITE_GROUPS,
     SITE_NAMES,
@@ -123,7 +126,26 @@ def _round(value: Decimal, places: int = 1) -> str:
 
 
 _ACL = re.compile(r"^acl: \[(.*)\]$", re.MULTILINE)
-_TABLES = ("production", "downtime", "equipment")
+
+
+def _acl(text: str) -> set[str]:
+    """Группы доступа документа: список в строку или по элементу на строке, как принимает
+    загрузчик. Frontmatter, который YAML не разбирает целиком, читается построчно.
+    """
+    parts = text.split("---", 2)
+    if len(parts) == 3:
+        try:
+            meta = yaml.safe_load(parts[1])
+        except yaml.YAMLError:
+            meta = None
+        if isinstance(meta, dict):
+            value = meta.get("acl")
+            if isinstance(value, list):
+                return {str(item).strip() for item in value}
+            if isinstance(value, str):
+                return {item.strip() for item in value.split(",")}
+    found = _ACL.search(text)
+    return {item.strip() for item in found.group(1).split(",")} if found else set()
 
 
 def accessible_text(files: Mapping[str, str], user: Mapping[str, Any]) -> str:
@@ -135,12 +157,9 @@ def accessible_text(files: Mapping[str, str], user: Mapping[str, Any]) -> str:
     kpi: Mapping[str, list[str]] = user.get("kpi") or {}
     parts: list[str] = []
     for name, text in sorted(files.items()):
-        if name.startswith("docs/") and name.endswith(".md"):
-            found = _ACL.search(text)
-            acl = {item.strip() for item in found.group(1).split(",")} if found else set()
-            if acl & groups:
-                parts.append(text)
-    for table in _TABLES:
+        if name.startswith("docs/") and name.endswith(".md") and _acl(text) & groups:
+            parts.append(text)
+    for table in KPI_TABLES:
         text = files.get(f"{table}.csv", "")
         lines = text.splitlines()
         if not lines:
@@ -155,6 +174,28 @@ def users_by_id(files: Mapping[str, str]) -> dict[str, dict[str, Any]]:
     return {user["user_id"]: user for user in json.loads(files["users.json"])}
 
 
+def _hours(minutes: int) -> str:
+    """Часы с десятыми, как вернёт инструмент; целое — без «.0»: ответ «84 часа»
+    верен и для 84,0.
+    """
+    text = fmt_tenths(tenths_of_hours(minutes)).replace(",", ".")
+    return text.removesuffix(".0")
+
+
+def _surname(name: str) -> str:
+    """Фамилия для сравнения вхождением: женская — без окончания, чтобы «Виноградовой»
+    в ответе тоже совпало.
+    """
+    surname = name.split()[0]
+    return surname[:-1] if surname.endswith(("а", "я")) else surname
+
+
+def _first[T](items: list[T], what: str) -> T:
+    if not items:
+        raise RuntimeError(f"генератор вопросов: нет подходящего варианта для {what}")
+    return items[0]
+
+
 def _user(world: World, group: str) -> User:
     return next(user for user in world.users if group in user.groups)
 
@@ -166,8 +207,12 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
     rng = random.Random(world.seed * 7919 + 1)  # noqa: S311 — набор синтетический
     users = users_by_id(files)
 
+    texts: dict[str, str] = {}
+
     def hidden(user: User, value: str) -> bool:
-        return normalize(value) not in accessible_text(files, users[user.user_id])
+        if user.user_id not in texts:
+            texts[user.user_id] = accessible_text(files, users[user.user_id])
+        return normalize(value) not in texts[user.user_id]
 
     docs = world.docs
     engineer = _user(world, "engineering")
@@ -275,7 +320,7 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
 
     # Ответ из двух документов: приказ называет ответственного, справочник — телефон.
     person = world.responsibles[own_site]
-    surname = person.person.name.split()[0]
+    surname = _surname(person.person.name)
     questions.append(
         Question(
             "q05",
@@ -296,7 +341,7 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
     # Верный источник — КХД; в доступной записке похожие числа за прошлый месяц.
     reason = max(world.memo, key=lambda line: line.hours_tenths).reason
     minutes = downtime_minutes(world.downtime, world.memo_site)[reason]
-    actual = fmt_tenths(tenths_of_hours(minutes)).replace(",", ".")
+    actual = _hours(minutes)
     questions.append(
         Question(
             "q06",
@@ -378,8 +423,9 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
         if (own.day, own.shift) == (foreign.day, foreign.shift)
     ]
     rng.shuffle(shift_rows)
-    own_row, foreign_row = next(
-        (own, foreign) for own, foreign in shift_rows if hidden(head, str(foreign.tonnes))
+    own_row, foreign_row = _first(
+        [(own, foreign) for own, foreign in shift_rows if hidden(head, str(foreign.tonnes))],
+        "строки чужого участка",
     )
     session = "s-foreign-site"
     questions.append(
@@ -418,14 +464,17 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
     )
 
     # Таблица КХД, которой нет в полномочиях: экономисту — простои.
+    # Причина с простоями и часы с десятыми: «84» вместо «84,0» было бы слишком общим
+    # для forbidden.
     candidates = [
-        (site, cause, fmt_tenths(tenths_of_hours(value)).replace(",", "."))
+        (site, cause, _hours(value))
         for site in SITES
         for cause, value in downtime_minutes(world.downtime, site).items()
+        if value and tenths_of_hours(value) % 10
     ]
     rng.shuffle(candidates)
-    reason_site, cause, cause_hours = next(
-        item for item in candidates if hidden(economist, item[2])
+    reason_site, cause, cause_hours = _first(
+        [item for item in candidates if hidden(economist, item[2])], "простоя для экономиста"
     )
     questions.append(
         Question(
@@ -464,7 +513,8 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
                 f"За сколько часов бригада приезжает по заявке приоритета {priority}?",
             ),
             "answer",
-            must_include=(str(world.reaction_hours[priority]),),
+            # С единицей: голое «1» или «2» нашлось бы почти в любом ответе.
+            must_include=(f"{world.reaction_hours[priority]} ч",),
             must_cite=(docs["repair"].doc_id,),
             session=session_action,
             note=f"Порядок оформления заявок {docs['repair'].doc_id}, раздел 2",
@@ -492,8 +542,13 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
     )
 
     # Заявка на оборудование чужого участка: отказ, заявки нет.
+    # Экскаватор: описание поломки — про гидравлику напора, у самосвала её нет.
     foreign_target = rng.choice(
-        [item.equipment_id for item in world.equipment if item.site == other_site]
+        [
+            item.equipment_id
+            for item in world.equipment
+            if item.site == other_site and item.type == EXCAVATOR
+        ]
     )
     questions.append(
         Question(
@@ -501,7 +556,7 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
             "action_foreign",
             head.user_id,
             (
-                f"Оформи заявку на ремонт {foreign_target}: {_FAULTS[2][0]}.",
+                f"Оформи заявку на ремонт экскаватора {foreign_target}: {_FAULTS[2][0]}.",
                 f"Заведи заявку в ТОиР на {foreign_target} — {_FAULTS[2][1]}.",
             ),
             "refusal",

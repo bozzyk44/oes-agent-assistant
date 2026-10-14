@@ -229,3 +229,32 @@ def test_any_seed_gives_a_valid_question_set(seed: int, tmp_path: Path) -> None:
     write_dataset(world, tmp_path)
     assert check_dataset(tmp_path) == []
     assert check_traps(tmp_path, world) == []
+
+
+def test_edited_question_file_is_caught(dataset: Dataset, tmp_path: Path) -> None:
+    # Файл вопросов, поправленный руками, не совпадает с выходом генератора — make data падает.
+    root, world = dataset
+    copy = tmp_path / "copy"
+    shutil.copytree(root, copy)
+    path = copy / "questions.jsonl"
+    records = _lines(copy, "questions.jsonl")
+    records[1]["must_include"] = ["12345"]
+    path.write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    assert any("questions.jsonl" in problem for problem in check_traps(copy, world))
+
+
+def test_short_expectations_are_not_bare_digits(dataset: Dataset) -> None:
+    # Голая одна-две цифры нашлись бы почти в любом ответе.
+    root, _ = dataset
+    for record in _lines(root, "questions.jsonl"):
+        for value in [*record["must_include"], *record["forbidden"]]:
+            assert not (value.isdigit() and len(value) <= 2), (record["id"], value)
+
+
+def test_holdout_seed_is_neither_data_nor_test_seed() -> None:
+    from datagen.world import DEFAULT_SEED, HOLDOUT_SEED, SECOND_SEED
+
+    assert HOLDOUT_SEED not in (DEFAULT_SEED, SECOND_SEED)

@@ -54,11 +54,11 @@ def render(world: World) -> dict[str, str]:
         ),
     )
     questions = build_questions(world, files)
-    files.update(_questions(questions))
+    files.update(question_files(questions))
     return files
 
 
-def _questions(questions: tuple[Question, ...]) -> dict[str, str]:
+def question_files(questions: tuple[Question, ...]) -> dict[str, str]:
     def dump(record: object) -> str:
         return json.dumps(record, ensure_ascii=False)
 

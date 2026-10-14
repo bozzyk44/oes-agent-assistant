@@ -10,15 +10,20 @@ from pathlib import Path
 
 from datagen.check import check_dataset, check_traps
 from datagen.render import write_dataset
-from datagen.world import DEFAULT_SEED, build_world
+from datagen.world import DEFAULT_SEED, HOLDOUT_SEED, build_world
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="datagen", description="Генератор набора данных")
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="зерно набора")
+    parser.add_argument("--seed", type=int, help="зерно набора")
+    parser.add_argument(
+        "--holdout", action="store_true", help="набор для итоговой проверки: своё зерно"
+    )
     parser.add_argument("--out", type=Path, default=Path("data"), help="каталог набора")
     parser.add_argument("--check", type=Path, metavar="DIR", help="только проверить готовый набор")
     args = parser.parse_args(argv)
+    if args.seed is None:
+        args.seed = HOLDOUT_SEED if args.holdout else DEFAULT_SEED
 
     if args.check is not None:
         root: Path = args.check

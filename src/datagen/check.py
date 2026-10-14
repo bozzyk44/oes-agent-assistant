@@ -19,6 +19,7 @@ from datagen.questions import (
     DOUBLE_CASES,
     accessible_text,
     build_questions,
+    users_by_id,
 )
 from datagen.render import (
     DOWNTIME_HEADER,
@@ -27,6 +28,7 @@ from datagen.render import (
     PERIODICITY_PHRASE,
     PRODUCTION_HEADER,
     TIME_FORMAT,
+    question_files,
 )
 from datagen.text import fmt_int, fmt_tenths, min_tokens, normalize, tenths_of_hours
 from datagen.world import (
@@ -170,7 +172,7 @@ def _check_questions(root: Path, name: str, problems: list[str]) -> None:
     доступных автору вопроса, — иначе прогон покажет ложную утечку.
     """
     files = _files(root)
-    users = {user["user_id"]: user for user in json.loads(files["users.json"])}
+    users = users_by_id(files)
     docs = {path.removeprefix("docs/").removesuffix(".md") for path in files if "/" in path}
     seen: set[str] = set()
     texts: dict[str, str] = {}
@@ -221,11 +223,15 @@ def _check_questions(root: Path, name: str, problems: list[str]) -> None:
 def _check_question_set(root: Path, world: World, problems: list[str]) -> None:
     """Состав вопросов своего набора: число, сессии, случаи задания, формулировки и разметка."""
     expected = build_questions(world, _files(root))
+    # Файлы на диске — ровно выход генератора: ожидания, формулировки и разметка, которые
+    # прочтёт прогон, совпадают с проверенными ниже.
+    for name, text in question_files(expected).items():
+        path = root / name
+        if not path.exists() or path.read_text(encoding="utf-8") != text:
+            problems.append(f"{name}: не совпадает с выходом генератора")
     main = _read_questions(root, "questions.jsonl", problems)
     if len(main) < MIN_QUESTIONS:
         problems.append(f"questions.jsonl: вопросов {len(main)}, нужно не меньше {MIN_QUESTIONS}")
-    if [record.get("id") for record in main] != [question.qid for question in expected]:
-        problems.append("questions.jsonl: вопросы не совпадают с выходом генератора")
     sessions: dict[object, int] = {}
     for record in main:
         if record.get("session") is not None:
@@ -256,10 +262,6 @@ def _check_question_set(root: Path, world: World, problems: list[str]) -> None:
             body = (root / "docs" / f"{label.doc_id}.md").read_text(encoding="utf-8")
             if f"\n## {label.section}. " not in body:
                 problems.append(f"вопросы: у {question.qid} разметка на несуществующий раздел")
-    variants = _read_questions(root, "questions.variants.jsonl", problems)
-    count = sum(len(question.formulations) for question in expected)
-    if len(variants) != count:
-        problems.append("questions.variants.jsonl: число формулировок не то")
 
 
 def read_docs(root: Path, problems: list[str]) -> list[DocFile]:
