@@ -160,7 +160,7 @@ def _dataset_references(tree: ast.AST) -> list[tuple[int, str]]:
             # Абсолютный и относительный импорт: `assistant.db.models`, `..db.models`.
             if node.module.endswith("db.models") and names & (_DATASET_MODELS | {"*"}):
                 found.append((node.lineno, f"импорт из {node.module}"))
-            if node.module.startswith("assistant.access") and names & _ACCESS_INTERNALS:
+            if "access" in node.module.split(".") and names & _ACCESS_INTERNALS:
                 found.append((node.lineno, f"импорт внутренностей {node.module}"))
         elif isinstance(node, ast.Attribute) and node.attr in _DATASET_MODELS | _ACCESS_INTERNALS:
             found.append((node.lineno, f"обращение к .{node.attr}"))
@@ -192,6 +192,7 @@ def test_only_access_layer_reads_dataset_tables() -> None:
         "q = text('select * from dwh.production')",
         "from ..db.models import Downtime",
         "from assistant.access import kpi\nkpi.TABLES",
+        "from ..access.kpi import TABLES",
     ],
 )
 def test_dataset_reference_check_catches_bypass(source: str) -> None:

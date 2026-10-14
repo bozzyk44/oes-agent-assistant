@@ -21,7 +21,6 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     Table,
-    func,
     select,
 )
 
@@ -132,7 +131,13 @@ def query_rows(connection: Connection, grants: Grants, query: KpiQuery) -> KpiRe
     missing_equipment: tuple[str, ...] = ()
     if named_equipment is not None:
         located = locate(connection, named_equipment)
-        own = sorted({item.key for item in located.values() if item.site in granted})
+        own = sorted(
+            {
+                item.equipment_id
+                for item in located.values()
+                if item.equipment_id is not None and item.site in granted
+            }
+        )
         unknown = sorted(name for name, item in located.items() if item.site is None)
         foreign = sorted(
             name for name, item in located.items() if item.site and item.site not in granted
@@ -140,8 +145,8 @@ def query_rows(connection: Connection, grants: Grants, query: KpiQuery) -> KpiRe
         if named_equipment and not own:
             return KpiResult(Status.DENIED if foreign else Status.NOT_FOUND)
         denied_equipment, missing_equipment = tuple(foreign), tuple(unknown)
-        # Строки — по тому же ключу, что и участок: написание модели не важно.
-        conditions.append(func.dwh.equipment_key(table.c[EQUIPMENT_ID]).in_(own))
+        # Строки — по написанию из набора, а не по написанию модели.
+        conditions.append(table.c[EQUIPMENT_ID].in_(own))
 
     site: Column[str] = table.c[SITE]
     statement = (

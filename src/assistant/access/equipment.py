@@ -1,9 +1,11 @@
-"""Участок оборудования — из базы, а не из слов модели.
+"""Оборудование, названное моделью: написание из набора и участок — из базы.
 
-Функция базы идёт в обход политик и возвращает только код участка: право на заявку задаётся
-отдельно от права на таблицу оборудования, и пользователь может оформлять заявки, не видя
-этой таблицы. Идентификатор сравнивается по ключу, который считает база: без регистра,
-пробелов и дефисов, с приведением похожих кириллических букв к латинским.
+Функции базы идут в обход политик и возвращают по одному значению: право на заявку
+задаётся отдельно от права на таблицу оборудования, и пользователь может оформлять заявки,
+не видя этой таблицы. Идентификатор находится точно или по однозначному ключу —
+без регистра, пробелов и дефисов, с приведением похожих кириллических букв к латинским.
+Ключ, общий у двух разных идентификаторов, не находит ни один: иначе первый попавшийся
+мог бы выдать чужое оборудование за своё.
 """
 
 from collections.abc import Iterable
@@ -11,23 +13,23 @@ from dataclasses import dataclass
 
 from sqlalchemy import Connection, text
 
-_SITES = text(
-    "select id, dwh.equipment_key(id), dwh.equipment_site(id)"
-    " from unnest(cast(:ids as text[])) as id"
+_LOCATE = text(
+    "select name, dwh.equipment_id(name), dwh.equipment_site(name)"
+    " from unnest(cast(:names as text[])) as name"
 )
 
 
 @dataclass(frozen=True)
 class Located:
-    # Ключ сравнения: по нему же фильтруются строки таблиц.
-    key: str
-    # `None` — такого оборудования нет.
+    # Написание из набора; `None` — такого оборудования нет или написание неоднозначно.
+    equipment_id: str | None
     site: str | None
 
 
-def locate(connection: Connection, ids: Iterable[str]) -> dict[str, Located]:
-    """Ключ и участок каждого названного идентификатора — одним запросом."""
-    wanted = sorted(set(ids))
+def locate(connection: Connection, names: Iterable[str]) -> dict[str, Located]:
+    """Каждое названное оборудование — одним запросом."""
+    wanted = sorted(set(names))
     if not wanted:
         return {}
-    return {row[0]: Located(row[1], row[2]) for row in connection.execute(_SITES, {"ids": wanted})}
+    rows = connection.execute(_LOCATE, {"names": wanted})
+    return {row[0]: Located(row[1], row[2]) for row in rows}

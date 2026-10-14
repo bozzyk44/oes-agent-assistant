@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import Connection, event
+from sqlalchemy import Connection, event, text
 
 from assistant.access import (
     Filter,
@@ -305,9 +305,13 @@ def test_site_filters_intersect_after_mapping_to_codes(connect: Barrier) -> None
 
 
 # Кириллические «Е» и «Х», пробелы, регистр и пропущенный дефис.
-@pytest.mark.parametrize("own", ["EX-1", "ЕХ-1", " ex-1 ", "ех1", "Ex 1"])
-def test_equipment_is_matched_regardless_of_spelling(connect: Barrier, own: str) -> None:
-    foreign = own.replace("1", "2")
+@pytest.mark.parametrize(
+    ("own", "foreign"),
+    [("EX-1", "EX-2"), ("ЕХ-1", "ЕХ-2"), (" ex-1 ", "ex-2"), ("ех1", "ех2"), ("Ex 1", "Ex 2")],
+)
+def test_equipment_is_matched_regardless_of_spelling(
+    connect: Barrier, own: str, foreign: str
+) -> None:
     with _open(connect, "u-k1") as (connection, grants):
         rows = query_rows(
             connection, grants, KpiQuery("downtime", (Filter("equipment_id", "eq", own),))
@@ -354,6 +358,48 @@ def test_search_finds_identifiers_exactly(connect: Barrier) -> None:
         found = search(connection, grants, "EX-1")
     # Идентификатор совпал точно — фрагмент с ним первый, хотя число «1» есть и в других.
     assert found.chunks[0].chunk_id == "A1#1"
+
+
+@pytest.fixture
+def lookalike(database: Database, small: Path) -> Iterator[None]:
+    """На чужом участке — оборудование, чей ключ совпадает с ключом своего: `EX1` и `EX-1`.
+
+    Строка добавляется владельцем на время теста и удаляется после: набор в базе общий.
+    """
+    insert = (
+        "insert into dwh.equipment (equipment_id, type, model, site, motor_hours,"
+        " last_ppr_motor_hours) values ('EX1', 'экскаватор', 'ЭКГ-5', 'K2', 100, 50)"
+    )
+    with database.owner.begin() as connection:
+        connection.execute(text(insert))
+    try:
+        yield
+    finally:
+        with database.owner.begin() as connection:
+            connection.execute(text("delete from dwh.equipment where equipment_id = 'EX1'"))
+
+
+def test_ambiguous_equipment_key_is_never_taken_for_own(connect: Barrier, lookalike: None) -> None:
+    # Два идентификатора с одним ключом на разных участках. Точное написание находит своё
+    # и чужое; написание, совпавшее только по ключу, не находит ни одно — иначе первая
+    # строка по порядку могла бы выдать чужое оборудование за своё.
+    with _open(connect, "u-k1") as (connection, grants):
+        exact_own = check_repair(connection, grants, "EX-1")
+        exact_foreign = check_repair(connection, grants, "EX1")
+        by_key = check_repair(connection, grants, "ех 1")
+        rows = query_rows(
+            connection, grants, KpiQuery("equipment", (Filter("equipment_id", "eq", "EX1"),))
+        )
+    assert exact_own.status is Status.OK
+    assert exact_foreign.status is Status.DENIED
+    assert by_key.status is Status.NOT_FOUND
+    assert rows.status is Status.DENIED
+    with _open(connect, "u-eng") as (connection, grants):
+        # Точное написание не подмешивает строки оборудования с тем же ключом.
+        own_rows = query_rows(
+            connection, grants, KpiQuery("equipment", (Filter("equipment_id", "eq", "EX-1"),))
+        )
+    assert [row["equipment_id"] for row in own_rows.rows] == ["EX-1"]
 
 
 # --- Второй барьер -------------------------------------------------------------------------

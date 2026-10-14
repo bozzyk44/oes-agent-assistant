@@ -80,6 +80,7 @@ def test_bypass_functions_are_callable_only_by_service_role(database: Database) 
         "kb.document_exists(text)",
         "dwh.equipment_site(text)",
         "kb.best_match_is_closed(text)",
+        "dwh.equipment_id(text)",
     )
     with database.owner.connect() as connection:
         for function in functions:
