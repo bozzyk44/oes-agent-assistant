@@ -17,9 +17,11 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import Engine, create_engine, text
 
 log = logging.getLogger(__name__)
@@ -57,7 +59,7 @@ _BY_KEY = text(
 )
 _ALL = text(
     "select id, idempotency_key, body_hash, equipment_id, description, priority, created_at"
-    " from toir.requests order by id"
+    " from toir.requests where cast(:key as text) is null or idempotency_key = :key order by id"
 )
 
 
@@ -69,7 +71,7 @@ class RepairRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     equipment_id: str = Field(min_length=1, max_length=200)
-    description: str = Field(max_length=10_000)
+    description: str = Field(min_length=1, max_length=10_000)
     priority: int = Field(ge=1, le=3, strict=True)
 
 
@@ -127,11 +129,15 @@ def _stored(row: Any) -> StoredRequest:
 def build_app(engine: Engine, token: str) -> FastAPI:
     ensure_schema(engine)
     app = FastAPI(title="Заглушка ТОиР", docs_url=None, redoc_url=None, openapi_url=None)
-    expected = f"Bearer {token}".encode()
+    expected = token.encode()
 
     def authorized(authorization: Annotated[str | None, Header()] = None) -> None:
-        # Сравнение за постоянное время; что именно не так, отказ не сообщает.
-        if authorization is None or not secrets.compare_digest(authorization.encode(), expected):
+        # Схема — без учёта регистра, токен — за постоянное время; что именно не так,
+        # отказ не сообщает.
+        scheme, _, given = (authorization or "").strip().partition(" ")
+        if scheme.lower() != "bearer" or not secrets.compare_digest(
+            given.strip().encode(), expected
+        ):
             raise HTTPException(status_code=401, detail="нужен токен ТОиР")
 
     guarded = [Depends(authorized)]
@@ -141,21 +147,32 @@ def build_app(engine: Engine, token: str) -> FastAPI:
         try:
             with engine.connect() as connection:
                 connection.execute(text("select 1 from toir.requests limit 1"))
-        except Exception:
-            log.exception("проверка готовности: база недоступна")
+        except Exception as error:
+            # Проверку зовут каждые несколько секунд: без трассировки, одной строкой.
+            log.warning("проверка готовности: база недоступна: %s", type(error).__name__)
             return JSONResponse(status_code=503, content={"status": "база недоступна"})
         return JSONResponse(content={"status": "ok"})
 
     @app.post("/requests", dependencies=guarded)
-    def create_request(
-        body: RepairRequest,
+    async def create_request(
+        request: Request,
         idempotency_key: Annotated[str | None, Header()] = None,
     ) -> JSONResponse:
+        # Порядок проверок: токен (зависимость выше), ключ, тело. Тело разбирается здесь,
+        # а не фреймворком: иначе неразборчивый JSON без токена получал бы 422, а не 401.
         if not idempotency_key or len(idempotency_key) > MAX_KEY_LENGTH:
             raise HTTPException(
                 status_code=400,
                 detail=f"нужен заголовок Idempotency-Key длиной до {MAX_KEY_LENGTH} символов",
             )
+        try:
+            body = RepairRequest.model_validate_json(await request.body())
+        except ValidationError as error:
+            details = jsonable_encoder(error.errors(include_input=False, include_url=False))
+            return JSONResponse(status_code=422, content={"detail": details})
+        return await run_in_threadpool(_create, idempotency_key, body)
+
+    def _create(idempotency_key: str, body: RepairRequest) -> JSONResponse:
         values = {"key": idempotency_key, "body_hash": _body_hash(body), **body.model_dump()}
         with engine.begin() as connection:
             created = connection.execute(_INSERT, values).first()
@@ -172,8 +189,9 @@ def build_app(engine: Engine, token: str) -> FastAPI:
         )
 
     @app.get("/requests", dependencies=guarded)
-    def list_requests() -> list[StoredRequest]:
+    def list_requests(idempotency_key: str | None = None) -> list[StoredRequest]:
+        """Все заявки по порядку создания; с `idempotency_key` — только заявка с этим ключом."""
         with engine.connect() as connection:
-            return [_stored(row) for row in connection.execute(_ALL)]
+            return [_stored(row) for row in connection.execute(_ALL, {"key": idempotency_key})]
 
     return app

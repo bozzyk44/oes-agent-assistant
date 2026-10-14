@@ -44,11 +44,18 @@ def _post(client: TestClient, key: str | None, body: Any = BODY, headers: Any = 
     return client.post("/requests", json=body, headers={**headers, **extra})
 
 
-def _mine(client: TestClient, *keys: str) -> list[dict[str, Any]]:
-    response = client.get("/requests", headers=AUTH)
+def _mine(client: TestClient, key: str) -> list[dict[str, Any]]:
+    response = client.get("/requests", headers=AUTH, params={"idempotency_key": key})
     assert response.status_code == 200
     rows: list[dict[str, Any]] = response.json()
-    return [row for row in rows if row["idempotency_key"] in keys]
+    return rows
+
+
+def test_list_without_filter_has_all_requests_in_order(client: TestClient) -> None:
+    keys = [_key(), _key()]
+    created = [_post(client, key).json() for key in keys]
+    rows = client.get("/requests", headers=AUTH).json()
+    assert [row for row in rows if row["idempotency_key"] in keys] == created
 
 
 def test_new_key_creates_request(client: TestClient) -> None:
@@ -80,16 +87,32 @@ def test_same_key_with_other_body_is_409(client: TestClient) -> None:
 
 @pytest.mark.parametrize(
     "headers",
-    [{}, {"Authorization": "Bearer wrong"}, {"Authorization": TOKEN}, {"Authorization": "Bearer "}],
-    ids=["нет", "неверный", "без схемы", "пустой"],
+    [
+        {},
+        {"Authorization": "Bearer wrong"},
+        {"Authorization": TOKEN},
+        {"Authorization": "Bearer "},
+        {"Authorization": f"Basic {TOKEN}"},
+    ],
+    ids=["нет", "неверный", "без схемы", "пустой", "другая схема"],
 )
 def test_request_without_valid_token_is_rejected(client: TestClient, headers: Any) -> None:
     key = _key()
-    # Отказ раньше проверки тела: даже неверное тело без токена — 401, а не 422.
+    # Отказ раньше проверки ключа и тела: и неверное тело, и неразборчивый JSON без ключа
+    # без токена — 401, а не 422 или 400.
     assert _post(client, key, headers=headers).status_code == 401
     assert _post(client, key, body={"x": 1}, headers=headers).status_code == 401
+    garbage = client.post("/requests", content=b"{not json", headers=headers)
+    assert garbage.status_code == 401
     assert client.get("/requests", headers=headers).status_code == 401
     assert _mine(client, key) == []
+
+
+@pytest.mark.parametrize("scheme", ["bearer", "BEARER", "Bearer  "])
+def test_bearer_scheme_is_case_insensitive(client: TestClient, scheme: str) -> None:
+    key = _key()
+    reply = _post(client, key, headers={"Authorization": f"{scheme} {TOKEN}"})
+    assert reply.status_code == 201
 
 
 @pytest.mark.parametrize(
@@ -98,10 +121,18 @@ def test_request_without_valid_token_is_rejected(client: TestClient, headers: An
         {**BODY, "priority": 4},
         {**BODY, "priority": "2"},
         {**BODY, "equipment_id": ""},
+        {**BODY, "description": ""},
         {"equipment_id": "XY-7", "priority": 2},
         {**BODY, "extra": "поле"},
     ],
-    ids=["приоритет 4", "приоритет строкой", "пустой идентификатор", "без описания", "лишнее"],
+    ids=[
+        "приоритет 4",
+        "приоритет строкой",
+        "пустой идентификатор",
+        "пустое описание",
+        "без описания",
+        "лишнее",
+    ],
 )
 def test_invalid_body_is_rejected_as_client_error(client: TestClient, body: Any) -> None:
     # Отказ как неверному запросу: сервис переводит действие в `failed` и не повторяет.
@@ -113,6 +144,15 @@ def test_invalid_body_is_rejected_as_client_error(client: TestClient, body: Any)
 @pytest.mark.parametrize("key", [None, "", "x" * 201])
 def test_idempotency_key_is_required(client: TestClient, key: str | None) -> None:
     assert _post(client, key).status_code == 400
+    # Ключ проверяется раньше тела.
+    assert _post(client, key, body={"priority": 9}).status_code == 400
+
+
+def test_invalid_json_with_token_is_422(client: TestClient) -> None:
+    reply = client.post(
+        "/requests", content=b"{not json", headers={**AUTH, "Idempotency-Key": _key()}
+    )
+    assert reply.status_code == 422
 
 
 def test_requests_survive_restart(engine: Engine, database: Database) -> None:
