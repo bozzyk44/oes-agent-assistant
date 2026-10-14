@@ -178,7 +178,9 @@ def test_two_confirmations_at_once(database: Database, small: object, toir: Toir
     assert not any(thread.is_alive() for thread in threads)
     assert [reply.status_code for reply in replies] == [200, 200]
     assert len({reply.json()["request_id"] for reply in replies}) == 1
-    assert len(toir.requests(_state(database, action_id)[1])) == 1
+    key = _state(database, action_id)[1]
+    assert len(toir.requests(key)) == 1
+    assert set(toir.sent) == {key}
 
 
 def _failing(status: int) -> Callable[..., Reply]:
@@ -217,6 +219,8 @@ def test_toir_unavailable_keeps_confirming_and_retry_succeeds(
     again = _confirm(service, action_id)
     assert again.status_code == 200
     assert len(toir.requests(key)) == 1
+    # Каждый вызов ТОиР — с одним и тем же ключом из строки действия.
+    assert set(toir.sent) <= {key}
     assert _state(database, action_id)[0] == "done"
 
 
@@ -259,7 +263,7 @@ def test_grant_revoked_before_confirmation(database: Database, small: object, to
             )
 
 
-def test_grant_revoked_before_retry_from_confirming(
+def test_grant_revoked_after_intent_retry_completes(
     database: Database, small: object, toir: Toir
 ) -> None:
     service = _service(database, toir)
@@ -267,15 +271,16 @@ def test_grant_revoked_before_retry_from_confirming(
     toir.fault = _failing(503)
     assert _confirm(service, action_id).status_code == 502
     toir.fault = None
-    calls = toir.calls
     with database.owner.begin() as connection:
         connection.execute(
             text("delete from app.repair_grants where user_id = 'u-k1' and site = 'K1'")
         )
     try:
-        assert _confirm(service, action_id).status_code == 403
-        assert toir.calls == calls
-        assert _state(database, action_id)[0] == "confirming"
+        # Намерение было разрешено: повтор доводит его, а не оставляет заявку незаписанной.
+        again = _confirm(service, action_id)
+        assert again.status_code == 200
+        assert _state(database, action_id)[0] == "done"
+        assert len(toir.requests(_state(database, action_id)[1])) == 1
     finally:
         with database.owner.begin() as connection:
             connection.execute(
@@ -368,7 +373,10 @@ def test_confirmation_and_rejection_at_once(database: Database, small: object, t
         assert toir.requests(key) == []
 
 
-def test_confirm_responses_carry_no_secret(database: Database, small: object, toir: Toir) -> None:
+def test_confirm_responses_and_log_carry_no_secret(
+    database: Database, small: object, toir: Toir, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("DEBUG")
     service = _service(database, toir)
     action_id = _propose(service)
     toir.fault = _failing(503)
@@ -376,3 +384,6 @@ def test_confirm_responses_carry_no_secret(database: Database, small: object, to
     toir.fault = None
     texts += [_confirm(service, action_id).text, _reject(service, action_id).text]
     assert all(TOIR_TOKEN not in body for body in texts)
+    # Отказ ТОиР попал в журнал — без токена.
+    assert "ТОиР ответил 503" in caplog.text
+    assert TOIR_TOKEN not in caplog.text

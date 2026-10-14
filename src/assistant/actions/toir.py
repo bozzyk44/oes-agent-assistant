@@ -87,9 +87,19 @@ class ToirClient:
         return Unknown(f"ТОиР ответил {reply.status}")
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Перенаправление не выполняется: иначе заголовок с токеном ушёл бы на другой адрес.
+    Ответ 3xx становится обычной ошибкой, исход — «неизвестно».
+    """
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
 def http_transport(base_url: str, timeout: float = TIMEOUT_SECONDS) -> Transport:
     """Транспорт по HTTP на стандартной библиотеке: ради одного вызова зависимость не нужна."""
     root = base_url.rstrip("/")
+    opener = urllib.request.build_opener(_NoRedirects)
 
     def send(method: str, path: str, headers: Mapping[str, str], body: Any) -> Reply:
         data = None if body is None else json.dumps(body, ensure_ascii=False).encode()
@@ -97,7 +107,7 @@ def http_transport(base_url: str, timeout: float = TIMEOUT_SECONDS) -> Transport
             root + path, data=data, method=method, headers=dict(headers)
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+            with opener.open(request, timeout=timeout) as response:
                 return Reply(response.status, _json(response.read()))
         except urllib.error.HTTPError as error:
             return Reply(error.code, _json(error.read()))

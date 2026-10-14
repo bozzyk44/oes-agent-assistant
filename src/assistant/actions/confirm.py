@@ -104,10 +104,12 @@ class Actions:
             if row.status == "failed":
                 # Повтор без вызова ТОиР: тот же запрос он отвергнет снова.
                 raise ToirFailed(row.failure_reason or "ТОиР отверг запрос")
-            # Полномочие — перед каждым вызовом ТОиР, и при повторе из `confirming` тоже:
-            # отозванное после неудачной попытки не даёт создать заявку следующей.
-            self._check_right(connection, user_id, row)
             if row.status == "proposed":
+                # Полномочие проверяется при намерении, и только при нём. Повтор из
+                # `confirming` доводит уже разрешённое намерение: заявка, возможно, создана
+                # прошлой попыткой, и отказ здесь оставил бы действие в `confirming` навсегда,
+                # а созданную заявку — незаписанной.
+                self._check_right(connection, user_id, row)
                 connection.execute(_TO_CONFIRMING, {"action_id": action_id})
             key, params = row.idempotency_key, row.params
 
