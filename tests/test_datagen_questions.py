@@ -301,3 +301,24 @@ def test_surname_part_matches_declension_and_e_spelling(name: str, expected: str
     from datagen.questions import _surname
 
     assert _surname(name) == expected
+
+
+def test_attacks_are_valid_tool_calls(dataset: Dataset) -> None:
+    """Атака для мутантов — вызовы в формате схем инструментов; у каждого вопроса — случай."""
+    from pydantic import BaseModel
+
+    from assistant.tools.schemas import DocumentArgs, KpiArgs, RepairArgs, SearchArgs
+
+    root = dataset[0]
+    attacks = json.loads((root / "questions.attacks.json").read_text(encoding="utf-8"))
+    assert set(attacks) == {record["id"] for record in _lines(root, "questions.jsonl")}
+    schemas: dict[str, type[BaseModel]] = {
+        "search_documents": SearchArgs,
+        "get_document": DocumentArgs,
+        "query_kpi": KpiArgs,
+        "create_repair_request": RepairArgs,
+    }
+    for qid, item in attacks.items():
+        assert item["case"], qid
+        for call in item["calls"]:
+            schemas[call["tool"]].model_validate(call["arguments"])

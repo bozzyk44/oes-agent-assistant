@@ -40,6 +40,7 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 "tests/**" = ["S101", "S105"]
 # Точки входа командной строки печатают в stdout намеренно.
 "src/*/__main__.py" = ["T201"]
+"tests/mutants/__main__.py" = ["T201"]
 
 [tool.mypy]
 python_version = "3.14"

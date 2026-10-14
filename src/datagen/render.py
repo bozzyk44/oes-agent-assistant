@@ -5,7 +5,8 @@
 формулировке на вопрос. `questions.variants.jsonl` — тот же формат, все формулировки:
 идентификатор `<вопрос>.<номер>`, сессии — свои на каждый номер. `questions.labels.json` —
 разметка фрагментов с ответом: `<документ>#<раздел>` по каждому вопросу; формат
-`questions.jsonl` она не меняет.
+`questions.jsonl` она не меняет. `questions.attacks.json` — случай из таблицы задания и атака
+по каждому вопросу: прямые вызовы инструментов, которыми заглушка модели проверяет мутантов.
 """
 
 import calendar
@@ -75,10 +76,15 @@ def question_files(questions: tuple[Question, ...]) -> dict[str, str]:
         ]
         for question in questions
     }
+    attacks = {
+        question.qid: {"case": question.case, "calls": list(question.attack)}
+        for question in questions
+    }
     return {
         "questions.jsonl": "\n".join(main) + "\n",
         "questions.variants.jsonl": "\n".join(variants) + "\n",
         "questions.labels.json": json.dumps(labels, ensure_ascii=False, indent=2) + "\n",
+        "questions.attacks.json": json.dumps(attacks, ensure_ascii=False, indent=2) + "\n",
     }
 
 
