@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import Connection
 
-from assistant.access.equipment import equipment_sites, normalize
+from assistant.access.equipment import locate
 from assistant.access.grants import Grants
 from assistant.access.status import Status
 
@@ -22,8 +22,7 @@ def check_repair(connection: Connection, grants: Grants, equipment_id: str) -> R
     Участок берётся из базы, а не из слов модели. Не совпал с полномочием — `denied`,
     и действие не создаётся.
     """
-    equipment_id = normalize(equipment_id)
-    site = equipment_sites(connection, [equipment_id]).get(equipment_id)
+    site = locate(connection, [equipment_id])[equipment_id].site
     if site is None:
         return RepairCheck(Status.NOT_FOUND)
     if site not in grants.repair_sites:

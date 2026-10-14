@@ -16,7 +16,8 @@ _USER = text("select name, position_title from app.users where user_id = :user_i
 _GROUPS = text("select group_name from app.user_groups where user_id = :user_id")
 _KPI = text("select table_name, site from app.kpi_grants where user_id = :user_id")
 _REPAIR = text("select site from app.repair_grants where user_id = :user_id")
-# Коды участков набора — из полномочий всех пользователей: это формат, а не содержимое.
+# Коды участков — из полномочий всех пользователей: это формат, а не содержимое. Участок,
+# на который полномочий нет ни у кого, кода не получает; его строк и так никто не видит.
 _SITES = text("select site from app.kpi_grants union select site from app.repair_grants")
 
 # Кириллические буквы, неотличимые на письме от латинских: модель переносит код участка

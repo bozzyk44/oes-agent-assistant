@@ -131,7 +131,9 @@ def test_service_code_knows_nothing_of_the_dataset() -> None:
         identifiers |= {doc.doc_id for doc in world.docs.values()}
         identifiers |= {user.user_id for user in world.users}
         identifiers |= {item.equipment_id for item in world.equipment}
-        identifiers |= {site for user in world.users for site in user.repair_requests}
+        for user in world.users:
+            identifiers |= {site for sites in user.kpi.values() for site in sites}
+            identifiers |= set(user.repair_requests)
     pattern = re.compile(
         r"(?<![\w-])(" + "|".join(map(re.escape, sorted(identifiers))) + r")(?![\w-])"
     )
@@ -155,11 +157,12 @@ def _dataset_references(tree: ast.AST) -> list[tuple[int, str]]:
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             names = {alias.name for alias in node.names}
-            if node.module == "assistant.db.models" and names & (_DATASET_MODELS | {"*"}):
+            # Абсолютный и относительный импорт: `assistant.db.models`, `..db.models`.
+            if node.module.endswith("db.models") and names & (_DATASET_MODELS | {"*"}):
                 found.append((node.lineno, f"импорт из {node.module}"))
-            if node.module.startswith("assistant.access.") and names & _ACCESS_INTERNALS:
+            if node.module.startswith("assistant.access") and names & _ACCESS_INTERNALS:
                 found.append((node.lineno, f"импорт внутренностей {node.module}"))
-        elif isinstance(node, ast.Attribute) and node.attr in _DATASET_MODELS:
+        elif isinstance(node, ast.Attribute) and node.attr in _DATASET_MODELS | _ACCESS_INTERNALS:
             found.append((node.lineno, f"обращение к .{node.attr}"))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             if re.search(r"\b(dwh|kb)\.\w", node.value):
@@ -187,6 +190,8 @@ def test_only_access_layer_reads_dataset_tables() -> None:
         "from assistant.db import models\nmodels.Chunk",
         "from assistant.access.kpi import TABLES",
         "q = text('select * from dwh.production')",
+        "from ..db.models import Downtime",
+        "from assistant.access import kpi\nkpi.TABLES",
     ],
 )
 def test_dataset_reference_check_catches_bypass(source: str) -> None:

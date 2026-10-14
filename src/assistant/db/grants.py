@@ -19,7 +19,7 @@ _GRANTS = (
     "grant select, insert on app.turns, app.messages to {role}",
     "grant select on dwh.production, dwh.downtime, dwh.equipment, kb.chunks to {role}",
     "grant execute on function kb.document_exists(text), dwh.equipment_site(text),"
-    " kb.best_match_is_closed(text) to {role}",
+    " kb.best_match_is_closed(text), dwh.equipment_key(text) to {role}",
 )
 
 

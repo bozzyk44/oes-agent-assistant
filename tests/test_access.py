@@ -219,6 +219,10 @@ def test_status_empty(connect: Barrier) -> None:
         KpiQuery("production", (Filter(["site"], "eq", "K1"),)),  # type: ignore[arg-type]
         KpiQuery("production", (Filter("site", ["eq"], "K1"),)),  # type: ignore[arg-type]
         KpiQuery(["production"]),  # type: ignore[arg-type]
+        KpiQuery(
+            "downtime",
+            (Filter("equipment_id", "eq", "EX-1"), Filter("equipment_id", "eq", "T-1")),
+        ),
         KpiQuery("production", limit=0),
         KpiQuery("production", limit=10_000),
     ],
@@ -275,15 +279,49 @@ def test_foreign_site_written_differently_is_still_denied(connect: Barrier, writ
     assert result.status is Status.DENIED
 
 
-def test_unknown_site_code_is_invalid_not_denied(connect: Barrier) -> None:
-    # Название вместо кода или опечатка — неверный аргумент: модель исправит его,
-    # а не откажет пользователю в его собственном участке.
+def test_unknown_site_code_is_invalid_and_lists_all_codes(connect: Barrier) -> None:
+    # Название вместо кода — неверный аргумент. В ответе все коды участков, а не только
+    # свои: модель повторит вызов с чужим кодом и получит отказ, а не данные своего.
     with _open(connect, "u-k1") as (connection, grants):
         result = query_rows(
-            connection, grants, KpiQuery("production", (Filter("site", "eq", "Карьер-1"),))
+            connection, grants, KpiQuery("production", (Filter("site", "eq", "Карьер-2"),))
+        )
+        retried = query_rows(
+            connection, grants, KpiQuery("production", (Filter("site", "eq", "K2"),))
         )
     assert result.status is Status.INVALID
-    assert "K1" in result.problem
+    assert "K1" in result.problem and "K2" in result.problem
+    assert retried.status is Status.DENIED
+
+
+def test_site_filters_intersect_after_mapping_to_codes(connect: Barrier) -> None:
+    with _open(connect, "u-k1") as (connection, grants):
+        result = query_rows(
+            connection,
+            grants,
+            KpiQuery("production", (Filter("site", "eq", "K1"), Filter("site", "in", ["к1"]))),
+        )
+    assert (result.status, result.sites) == (Status.OK, ("K1",))
+
+
+# Кириллические «Е» и «Х», пробелы, регистр и пропущенный дефис.
+@pytest.mark.parametrize("own", ["EX-1", "ЕХ-1", " ex-1 ", "ех1", "Ex 1"])
+def test_equipment_is_matched_regardless_of_spelling(connect: Barrier, own: str) -> None:
+    foreign = own.replace("1", "2")
+    with _open(connect, "u-k1") as (connection, grants):
+        rows = query_rows(
+            connection, grants, KpiQuery("downtime", (Filter("equipment_id", "eq", own),))
+        )
+        denied = query_rows(
+            connection, grants, KpiQuery("downtime", (Filter("equipment_id", "eq", foreign),))
+        )
+        repair_own = check_repair(connection, grants, own)
+        repair_foreign = check_repair(connection, grants, foreign)
+    assert rows.status is Status.OK
+    assert [row["equipment_id"] for row in rows.rows] == ["EX-1"]
+    # Чужое оборудование, написанное кириллицей, — отказ, а не «такого нет».
+    assert denied.status is Status.DENIED
+    assert (repair_own.status, repair_foreign.status) == (Status.OK, Status.DENIED)
 
 
 def test_kpi_comparisons_narrow_within_grants(connect: Barrier) -> None:

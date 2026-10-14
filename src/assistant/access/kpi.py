@@ -21,10 +21,11 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     Table,
+    func,
     select,
 )
 
-from assistant.access.equipment import equipment_sites, normalize
+from assistant.access.equipment import locate
 from assistant.access.grants import Grants, site_key
 from assistant.access.status import Status
 from assistant.db import models
@@ -104,18 +105,23 @@ def query_rows(connection: Connection, grants: Grants, query: KpiQuery) -> KpiRe
         # Запрос не выполняется вовсе: полномочий на таблицу нет.
         return KpiResult(Status.DENIED)
     try:
-        conditions, named_sites, named_equipment = _conditions(table, query)
+        conditions, site_filters, equipment_filters = _conditions(table, query)
         limit = _limit(query.limit)
+        # Несколько фильтров по участку пересекаются уже после приведения к кодам.
+        named_sites = (
+            frozenset.intersection(*(_canonical_sites(grants, item) for item in site_filters))
+            if site_filters
+            else None
+        )
+        if len(equipment_filters) > 1:
+            raise _Invalid("filters: по equipment_id — не больше одного фильтра")
     except _Invalid as error:
         return KpiResult(Status.INVALID, problem=str(error))
+    named_equipment = equipment_filters[0] if equipment_filters else None
 
     scope = granted
     denied_sites: tuple[str, ...] = ()
     if named_sites is not None:
-        try:
-            named_sites = _canonical_sites(grants, granted, named_sites)
-        except _Invalid as error:
-            return KpiResult(Status.INVALID, problem=str(error))
         denied_sites = tuple(sorted(named_sites - granted))
         scope = granted & named_sites
         if not scope:
@@ -125,14 +131,17 @@ def query_rows(connection: Connection, grants: Grants, query: KpiQuery) -> KpiRe
     denied_equipment: tuple[str, ...] = ()
     missing_equipment: tuple[str, ...] = ()
     if named_equipment is not None:
-        sites = equipment_sites(connection, named_equipment)
-        own = sorted(item for item, site in sites.items() if site in granted)
-        foreign = sorted(item for item, site in sites.items() if site and site not in granted)
-        unknown = sorted(item for item, site in sites.items() if site is None)
+        located = locate(connection, named_equipment)
+        own = sorted({item.key for item in located.values() if item.site in granted})
+        unknown = sorted(name for name, item in located.items() if item.site is None)
+        foreign = sorted(
+            name for name, item in located.items() if item.site and item.site not in granted
+        )
         if named_equipment and not own:
             return KpiResult(Status.DENIED if foreign else Status.NOT_FOUND)
         denied_equipment, missing_equipment = tuple(foreign), tuple(unknown)
-        conditions.append(table.c[EQUIPMENT_ID].in_(own))
+        # Строки — по тому же ключу, что и участок: написание модели не важно.
+        conditions.append(func.dwh.equipment_key(table.c[EQUIPMENT_ID]).in_(own))
 
     site: Column[str] = table.c[SITE]
     statement = (
@@ -153,17 +162,16 @@ def query_rows(connection: Connection, grants: Grants, query: KpiQuery) -> KpiRe
     )
 
 
-def _canonical_sites(
-    grants: Grants, granted: frozenset[str], named: frozenset[str]
-) -> frozenset[str]:
-    """Названные участки — к кодам приложения. Отказ — только для существующего чужого
-    кода: опечатка или название вместо кода — неверный аргумент, а не чужой участок.
+def _canonical_sites(grants: Grants, named: frozenset[str]) -> frozenset[str]:
+    """Названные участки — к кодам приложения. Опечатка или название вместо кода —
+    неверный аргумент: в ответе все коды участков, и модель повторит вызов с кодом —
+    своим или чужим, — а отказ по чужому даст сам запрос.
     """
-    codes = {site_key(code): code for code in grants.known_sites | granted}
+    codes = {site_key(code): code for code in grants.known_sites}
     unknown = sorted(site for site in named if site_key(site) not in codes)
     if unknown:
-        own = ", ".join(sorted(granted))
-        raise _Invalid(f"filters: нет участка с кодом {unknown[0]!r}; ваши участки: {own}")
+        known = ", ".join(sorted(grants.known_sites))
+        raise _Invalid(f"filters: {unknown[0]!r} — не код участка; коды участков: {known}")
     return frozenset(codes[site_key(site)] for site in named)
 
 
@@ -175,15 +183,15 @@ def _limit(value: object) -> int:
 
 def _conditions(
     table: Table, query: KpiQuery
-) -> tuple[list[ColumnElement[bool]], frozenset[str] | None, frozenset[str] | None]:
+) -> tuple[list[ColumnElement[bool]], list[frozenset[str]], list[frozenset[str]]]:
     """Условия фильтров и то, что в них названо явно: участки и оборудование.
 
     Фильтры по участку и оборудованию в условия не идут: участки становятся областью
     запроса внутри полномочий, оборудование — проверенным списком своего участка.
     """
     conditions: list[ColumnElement[bool]] = []
-    sites: frozenset[str] | None = None
-    equipment: frozenset[str] | None = None
+    sites: list[frozenset[str]] = []
+    equipment: list[frozenset[str]] = []
     for item in query.filters:
         if not isinstance(item, Filter) or not isinstance(item.column, str):
             raise _Invalid("filters: ожидался список фильтров с именем колонки")
@@ -195,10 +203,9 @@ def _conditions(
         if item.op in _LISTS:
             values = _values(column, item)
             if item.column == SITE:
-                sites = values if sites is None else sites & values
+                sites.append(values)
             elif item.column == EQUIPMENT_ID:
-                ids = frozenset(normalize(value) for value in values)
-                equipment = ids if equipment is None else equipment & ids
+                equipment.append(values)
             else:
                 conditions.append(column.in_(sorted(values)))
         elif item.op in _COMPARISONS:
