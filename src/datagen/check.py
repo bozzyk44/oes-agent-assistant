@@ -20,6 +20,7 @@ from datagen.questions import (
     MIN_NAME_PART,
     accessible_text,
     build_questions,
+    has_tenths,
     users_by_id,
 )
 from datagen.render import (
@@ -268,6 +269,15 @@ def _check_question_set(root: Path, world: World, problems: list[str]) -> None:
             memo = (root / "docs" / f"{world.docs['memo'].doc_id}.md").read_text(encoding="utf-8")
             if any(normalize(value) in normalize(memo) for value in question.must_include):
                 problems.append(f"вопросы: ответ {question.qid} есть в служебной записке")
+        if any("десят" in text for text in question.formulations) != question.tenths:
+            problems.append(f"вопросы: {question.qid} просит десятые без пометки или наоборот")
+        if question.tenths and not (
+            question.must_include and all(has_tenths(value) for value in question.must_include)
+        ):
+            problems.append(
+                f"вопросы: в must_include {question.qid} нет числа с ненулевыми десятыми —"
+                " подстрокой совпадёт с ответом, ошибочным в десятых"
+            )
         if any("ё" in value for value in question.must_include):
             problems.append(f"вопросы: в must_include {question.qid} есть «ё»")
         if any(
