@@ -54,12 +54,18 @@ def secrets_stay_out_of_log(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
     for name in ("assistant", "toir_stub"):
         caplog.set_level(logging.DEBUG, logger=name)
     yield
-    leaked = [
-        marker
-        for marker in (TOIR_TOKEN, MODEL_KEY, OWNER_PASSWORD, SERVICE_PASSWORD, TOIR_PASSWORD)
-        if marker in caplog.text
-    ]
-    assert leaked == [], "метка секрета в журнале"
+    # `caplog.text` после `yield` — только записи фазы завершения: перед каждой фазой
+    # pytest заводит журнал заново. Записи теста берутся по фазам явно.
+    records = [record for when in ("setup", "call") for record in caplog.get_records(when)]
+    markers = (TOIR_TOKEN, MODEL_KEY, OWNER_PASSWORD, SERVICE_PASSWORD, TOIR_PASSWORD)
+    assert leaked_markers(records, markers) == [], "метка секрета в журнале"
+
+
+def leaked_markers(records: list[logging.LogRecord], markers: tuple[str, ...]) -> list[str]:
+    """Метки, встретившиеся в записях журнала — в тексте и в трассировке исключения."""
+    formatter = logging.Formatter()
+    text = "\n".join(formatter.format(record) for record in records)
+    return [marker for marker in markers if marker in text]
 
 
 @dataclass(frozen=True)
