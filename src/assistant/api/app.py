@@ -5,7 +5,7 @@ import os
 import secrets
 import time
 from datetime import UTC, datetime
-from typing import Annotated, NoReturn
+from typing import Annotated
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -13,10 +13,21 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import Engine, text
 
+from assistant.actions.confirm import (
+    Actions,
+    Conflict,
+    Forbidden,
+    NotFound,
+    StoreResult,
+    ToirFailed,
+    store_result,
+)
+from assistant.actions.toir import ToirClient, Transport, http_transport
 from assistant.api.schemas import (
     ActionDone,
     ActionRejected,
     Citation,
+    PendingAction,
     TurnRequest,
     TurnResponse,
     Usage,
@@ -41,7 +52,6 @@ class TurnNotStarted(Exception):
 
 
 _USER_EXISTS = text("select 1 from app.users where user_id = :user_id")
-_ACTION_AUTHOR = text("select user_id from app.actions where action_id = :action_id")
 _READY = text(
     "select (select version_num from public.alembic_version),"
     " (select count(*) from app.dataset_version)"
@@ -68,11 +78,18 @@ def create_app() -> FastAPI:
     return build_app(default_runtime(settings, engine, NotReadyHandler(settings)), secret)
 
 
-def build_app(runtime: Runtime, toir_secret: ToirSecret) -> FastAPI:
+def build_app(
+    runtime: Runtime,
+    toir_secret: ToirSecret,
+    toir_transport: Transport | None = None,
+    store: StoreResult = store_result,
+) -> FastAPI:
+    """Приложение. Транспорт до ТОиР и запись результата подставляются тестами."""
     app = FastAPI(title="Ассистент сотрудника", docs_url=None, redoc_url=None, openapi_url=None)
-    # Секрет ТОиР лежит отдельно от того, что получает ход: до модели ему не добраться.
-    app.state.toir_secret = toir_secret
     engine = runtime.engine
+    # Секрет ТОиР уходит только в модуль действий: ходу и модели его не передают.
+    transport = toir_transport or http_transport(runtime.settings.toir_url)
+    actions = Actions(engine, ToirClient(transport, toir_secret.token), store)
     # Последняя версия схемы постоянна на всю жизнь процесса: читается один раз.
     schema_head = head_revision()
 
@@ -171,6 +188,13 @@ def build_app(runtime: Runtime, toir_secret: ToirSecret) -> FastAPI:
             log.exception("ход не начат")
             return not_started()
         result, usage = finished.result, finished.usage
+        pending = (
+            PendingAction(
+                action_id=finished.action_id, tool=result.action.tool, params=result.action.params
+            )
+            if result.action is not None and finished.action_id is not None
+            else None
+        )
         return TurnResponse(
             turn_id=finished.turn_id,
             outcome=result.outcome,  # type: ignore[arg-type]
@@ -178,7 +202,7 @@ def build_app(runtime: Runtime, toir_secret: ToirSecret) -> FastAPI:
             citations=[
                 Citation(doc_id=item.doc_id, chunk_id=item.chunk_id) for item in result.citations
             ],
-            pending_action=None,
+            pending_action=pending,
             usage=Usage(
                 model_calls=usage.model_calls,
                 input_tokens=usage.input_tokens,
@@ -190,22 +214,31 @@ def build_app(runtime: Runtime, toir_secret: ToirSecret) -> FastAPI:
             ),
         )
 
-    def not_yet(action_id: str, user_id: str) -> NoReturn:
-        with transaction(engine, user_id) as connection:
-            row = connection.execute(_ACTION_AUTHOR, {"action_id": action_id}).first()
-        if row is None:
-            raise HTTPException(status_code=404, detail="нет такого действия")
-        if row[0] != user_id:
-            raise HTTPException(status_code=403, detail="действие подтверждает его автор")
-        # Сам переход и вызов ТОиР появляются вместе с записью; каркас дальше не идёт.
-        raise HTTPException(status_code=501, detail="подтверждение и отказ ещё не реализованы")
+    def refused(error: Exception) -> HTTPException:
+        # Текст отказа — категория, без параметров заявки и без ответа ТОиР.
+        codes = ((NotFound, 404), (Forbidden, 403), (Conflict, 409), (ToirFailed, 502))
+        status = next(code for kind, code in codes if isinstance(error, kind))
+        detail = {
+            404: "нет такого действия",
+            403: "действие подтверждает его автор, пока у него есть полномочие",
+            409: "действие уже отклонено или подтверждено",
+            502: "ТОиР недоступен или отверг заявку; подтверждение можно повторить",
+        }[status]
+        return HTTPException(status_code=status, detail=detail)
 
     @app.post("/actions/{action_id}/confirm")
     def confirm(action_id: str, user_id: user) -> ActionDone:
-        return not_yet(action_id, user_id)
+        try:
+            return ActionDone(request_id=actions.confirm(action_id, user_id))
+        except (NotFound, Forbidden, Conflict, ToirFailed) as error:
+            raise refused(error) from None
 
     @app.post("/actions/{action_id}/reject")
     def reject(action_id: str, user_id: user) -> ActionRejected:
-        return not_yet(action_id, user_id)
+        try:
+            actions.reject(action_id, user_id)
+        except (NotFound, Forbidden, Conflict) as error:
+            raise refused(error) from None
+        return ActionRejected()
 
     return app

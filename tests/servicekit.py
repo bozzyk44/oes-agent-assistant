@@ -9,6 +9,8 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
+from assistant.actions.confirm import StoreResult, store_result
+from assistant.actions.toir import Transport
 from assistant.api.app import build_app
 from assistant.config import ModelSettings, Settings, ToirSecret
 from assistant.turn.runner import (
@@ -103,6 +105,8 @@ def make_service(
     *,
     model: bool = False,
     raise_server_exceptions: bool = True,
+    toir: Transport | None = None,
+    store: StoreResult = store_result,
 ) -> Service:
     clock = Clock()
     config = settings(database_url, model=model)
@@ -115,7 +119,7 @@ def make_service(
         new_turn_id=lambda: f"t-{RUN}-{next(_turns)}",
         new_token=uuid4,
     )
-    app = build_app(runtime, ToirSecret(TOIR_TOKEN))
+    app = build_app(runtime, ToirSecret(TOIR_TOKEN), toir, store)
     client = TestClient(app, raise_server_exceptions=raise_server_exceptions)
     return Service(runtime, clock, client)
 

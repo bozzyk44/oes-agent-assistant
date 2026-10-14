@@ -33,7 +33,6 @@ from assistant.turn.runner import (
 from tests.conftest import PROBE, SERVICE_PASSWORD, Database
 from tests.servicekit import (
     MODEL_KEY,
-    RUN,
     TOIR_TOKEN,
     Scripted,
     Service,
@@ -490,34 +489,6 @@ def test_every_transaction_is_bound_to_the_user(database: Database, small: Path)
 
 
 # --- действия: каркас маршрутов
-
-
-def test_action_routes_check_user_existence_and_author(
-    service: Service, database: Database
-) -> None:
-    session = new_session()
-    turn_id = service.turn("u-eng", session).body["turn_id"]
-    action_id = f"a-{RUN}-skeleton"
-    with transaction(database.service, "u-eng") as connection:
-        connection.execute(
-            text(
-                "insert into app.actions (action_id, user_id, session_id, turn_id, tool, params)"
-                " values (:a, 'u-eng', :s, :t, 'create_repair_request', '{}')"
-            ),
-            {"a": action_id, "s": session, "t": turn_id},
-        )
-    for verb in ("confirm", "reject"):
-        missing = service.client.post(f"/actions/нет/{verb}", headers={"X-User-ID": "u-eng"})
-        foreign = service.client.post(f"/actions/{action_id}/{verb}", headers={"X-User-ID": "u-k1"})
-        own = service.client.post(f"/actions/{action_id}/{verb}", headers={"X-User-ID": "u-eng"})
-        assert (missing.status_code, foreign.status_code) == (404, 403)
-        # Сам переход появится вместе с записью; каркас честно отвечает, что его нет.
-        assert own.status_code == 501
-    with database.owner.connect() as connection:
-        status = connection.scalar(
-            text("select status from app.actions where action_id = :a"), {"a": action_id}
-        )
-    assert status == "proposed"
 
 
 # --- готовность и старт процесса
