@@ -39,11 +39,11 @@ def _calculate_inputs(item: dict[str, Any]) -> list[str]:
         return []
     if not isinstance(arguments, dict):
         return []
-    text = " ".join(
-        [str(value) for value in arguments.get("numbers") or []]
-        + [str(arguments.get("expression") or "")]
-    )
-    return _NUMBER.findall(normalize(text))
+    # Каждое значение — отдельно: нормализация убирает пробел между цифрами, и склеенный
+    # через пробел список чисел превратился бы в одно число.
+    values = [str(value) for value in arguments.get("numbers") or []]
+    values.append(str(arguments.get("expression") or ""))
+    return [number for value in values for number in _NUMBER.findall(normalize(value))]
 
 
 def diagnose(

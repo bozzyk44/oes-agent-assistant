@@ -240,7 +240,7 @@ def test_diagnostics_from_the_turn_record() -> None:
 def test_calculate_inputs_and_calls_in_text() -> None:
     # Вызов запроса к хранилищу ушёл в текст и не выполнен; в расчёт подано выдуманное число.
     leaked = '<|tool_call>call:query_kpi{table:<|"|>production<|"|>}<tool_call|>'
-    record = {
+    record: dict[str, Any] = {
         "calls": [
             {
                 "content": leaked,
@@ -268,6 +268,14 @@ def test_calculate_inputs_and_calls_in_text() -> None:
     # 2970 — из поиска, 14 — из вопроса, 100 — постоянная; 114300 опоры не имеет, хотя
     # и стоит в результате самого расчёта.
     assert (diag["calculate_inputs"], diag["calculate_inputs_grounded"]) == (3, 2)
+
+    # Список чисел: каждое — свой вход, а не одно склеенное число.
+    record["calls"][1]["tool_calls"][0]["arguments"] = (
+        '{"operation": "percent", "numbers": [2970, 137400]}'
+    )
+    diag = diagnose(record, "Выполнение плана за 14 дней?", "")
+    assert diag is not None
+    assert (diag["calculate_inputs"], diag["calculate_inputs_grounded"]) == (2, 1)
 
 
 def test_fragment_label_matches_its_parts() -> None:
