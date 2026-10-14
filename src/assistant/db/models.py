@@ -12,6 +12,7 @@ from sqlalchemy import (
     BigInteger,
     Date,
     DateTime,
+    Double,
     FetchedValue,
     ForeignKey,
     Integer,
@@ -154,6 +155,17 @@ class Action(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=_BY_DB, server_onupdate=_BY_DB
     )
+
+
+class TokenCalibration(Base):
+    """Поправка оценки токенов модели: только растёт."""
+
+    __tablename__ = "token_calibration"
+    __table_args__ = {"schema": "app"}  # noqa: RUF012
+
+    model: Mapped[str] = mapped_column(Text, primary_key=True)
+    factor: Mapped[float] = mapped_column(Double)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_BY_DB)
 
 
 class Production(Base):

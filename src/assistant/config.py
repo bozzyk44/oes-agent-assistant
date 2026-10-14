@@ -27,6 +27,33 @@ FORMAT_MODES: tuple[FormatMode, ...] = ("last", "all", "off")
 
 
 @dataclass(frozen=True)
+class CharCosts:
+    """Сколько символов каждого класса приходится на один токен; меньше — дороже."""
+
+    letters: float = 3.0
+    digits: float = 1.0
+    spaces: float = 4.0
+    other: float = 1.5
+
+    @classmethod
+    def parse(cls, raw: str) -> CharCosts:
+        """`letters=3,digits=1,spaces=4,other=1.5`; пропущенный класс — умолчание."""
+        values: dict[str, float] = {}
+        for part in raw.split(","):
+            if not part.strip():
+                continue
+            name, _, value = part.partition("=")
+            name = name.strip()
+            if name not in cls.__dataclass_fields__:
+                raise ValueError(f"неизвестный класс символов: {name!r}")
+            number = float(value)
+            if not math.isfinite(number) or number <= 0:
+                raise ValueError(f"{name}: нужно положительное число")
+            values[name] = number
+        return cls(**values)
+
+
+@dataclass(frozen=True)
 class ModelSettings:
     base_url: str
     # Ключ не показывается ни в repr настроек, ни в журнале.
@@ -38,6 +65,8 @@ class ModelSettings:
     timeout_seconds: float = 45.0
     # Принуждение к формату ответа: только на последнем вызове хода, на всех или выключено.
     response_format: FormatMode = "last"
+    # Символов на токен по классам — для оценки входа до вызова; умолчания завышают оценку.
+    token_costs: CharCosts = field(default_factory=CharCosts)
     # Параметры конкретного провайдера, которых нет в общем протоколе. Значения могут
     # быть чувствительными, поэтому в repr их нет.
     extra_body: dict[str, Any] = field(default_factory=dict, repr=False)
@@ -128,6 +157,13 @@ def _extra_body(env: Mapping[str, str]) -> dict[str, Any]:
     return value
 
 
+def _token_costs(env: Mapping[str, str]) -> CharCosts:
+    try:
+        return CharCosts.parse(env.get("MODEL_TOKEN_CHARS", ""))
+    except ValueError as error:
+        raise ConfigError(f"MODEL_TOKEN_CHARS: {error}") from None
+
+
 def load_settings(env: Mapping[str, str]) -> Settings:
     settings = Settings(
         database_url=_required(env, "DATABASE_URL"),
@@ -140,6 +176,7 @@ def load_settings(env: Mapping[str, str]) -> Settings:
             timeout_seconds=_seconds(env, "MODEL_TIMEOUT_SECONDS", 45),
             response_format=_format_mode(env),
             extra_body=_extra_body(env),
+            token_costs=_token_costs(env),
         ),
         toir_url=env.get("TOIR_URL") or "http://toir:8001",
         max_message_chars=_count(env, "MAX_MESSAGE_CHARS", 4000),
