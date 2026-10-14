@@ -17,6 +17,9 @@ from sqlalchemy import Connection, text
 from assistant.config import CharCosts
 from assistant.model import ChatRequest
 
+# Потолок поправки: больше — скорее сбой счётчика провайдера, чем токенизатор. Без потолка
+# одно неправдоподобное число навсегда сделало бы любой вход «больше лимита».
+MAX_FACTOR = 2.0
 # Служебные токены разметки чата на каждое сообщение и на запрос целиком.
 MESSAGE_OVERHEAD = 8
 REQUEST_OVERHEAD = 16
@@ -71,9 +74,10 @@ class Estimator:
 
     def learn(self, raw: float, actual: int) -> bool:
         """Сверка с фактом: поправка растёт, если оценка оказалась меньше. Вниз — никогда."""
-        if raw <= 0 or actual <= raw * self.factor:
+        if raw <= 0 or actual <= raw * self.factor or self.factor >= MAX_FACTOR:
             return False
-        self.factor = actual / raw
+        # Параллельные ходы: поправка в памяти тоже только растёт.
+        self.factor = max(self.factor, min(actual / raw, MAX_FACTOR))
         return True
 
 
@@ -89,7 +93,7 @@ _SAVE = text(
 
 def load_factor(connection: Connection, model: str) -> float:
     value = connection.scalar(_LOAD, {"model": model})
-    return max(float(value), 1.0) if value is not None else 1.0
+    return min(max(float(value), 1.0), MAX_FACTOR) if value is not None else 1.0
 
 
 def save_factor(connection: Connection, model: str, factor: float) -> None:

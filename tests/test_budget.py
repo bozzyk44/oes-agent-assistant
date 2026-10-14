@@ -18,8 +18,8 @@ from assistant.access import Status
 from assistant.config import CharCosts, ConfigError, load_settings
 from assistant.db.session import transaction
 from assistant.ingest.chunks import TOOL_RESULT_TOKENS
-from assistant.model import ChatRequest, ModelReply, UsageReport
-from assistant.tools.box import CUT_MARK, ToolBox
+from assistant.model import ChatRequest, ModelReply, TransientModelError, UsageReport
+from assistant.tools.box import CUT_MARK, ToolBox, ToolResult
 from assistant.tools.schemas import KPI, SEARCH
 from assistant.turn import agent
 from assistant.turn.agent import (
@@ -30,8 +30,9 @@ from assistant.turn.agent import (
     AgentHandler,
     _State,
 )
+from assistant.turn.context import HistoryMessage
 from assistant.turn.prefix import PREFIX
-from assistant.turn.tokens import Estimator, text_tokens
+from assistant.turn.tokens import MAX_FACTOR, Estimator, text_tokens
 from tests.conftest import Database
 from tests.modelstub import ScriptedModel, call, final, tools
 from tests.servicekit import (
@@ -98,6 +99,14 @@ def test_estimate_is_not_below_recorded_usage() -> None:
     assert Estimator(CharCosts()).request(request) >= 648
 
 
+def test_correction_has_a_ceiling() -> None:
+    # Неправдоподобное число провайдера не делает любой вход «больше лимита» навсегда.
+    estimator = Estimator(CharCosts())
+    assert estimator.learn(100.0, 1_000_000)
+    assert estimator.factor == MAX_FACTOR
+    assert not estimator.learn(100.0, 2_000_000)
+
+
 def test_correction_only_goes_up() -> None:
     estimator = Estimator(CharCosts())
     assert not estimator.learn(100.0, 50)
@@ -129,7 +138,7 @@ def test_endless_tool_calls_stop_at_four_calls(database: Database, small: Path) 
     assert reply.body["outcome"] == "budget_exceeded"
 
 
-def test_every_call_fits_the_call_and_turn_limits(database: Database, small: Path) -> None:
+def test_every_sent_call_fits_the_call_limit(database: Database, small: Path) -> None:
     # Каждый вызов, который ушёл, помещается в лимиты по оценке — с запасом против факта.
     model = ScriptedModel([], tail=tools(call(SEARCH, query="памятка регламент ремонт")))
     service, _, _ = _service(database, model)
@@ -181,6 +190,33 @@ def test_actual_input_of_past_calls_plus_this_estimate(database: Database) -> No
     boundary = TURN_TOKENS - last[1]
     assert handler._prepare(_state(spent=boundary), 1, 30.0) is not None
     assert handler._prepare(_state(spent=boundary + 1), 1, 30.0) is None
+
+
+def test_history_is_dropped_before_tool_results(database: Database) -> None:
+    handler = _handler(database)
+    history = [
+        HistoryMessage("user", "Старый вопрос", (), "t-old"),
+        HistoryMessage("assistant", "Старый ответ. " * 2500, (), "t-old"),
+        HistoryMessage("user", "Недавний вопрос", (), "t-new"),
+        HistoryMessage("assistant", "Недавний ответ", (), "t-new"),
+    ]
+    tool: dict[str, Any] = {"role": "tool", "tool_call_id": "a", "content": "результат"}
+    state = _State("[Сведения]", history, "", "Вопрос", "t-now")
+    state.turn = [{"role": "assistant", "content": "", "tool_calls": []}, tool]
+    prepared = handler._prepare(state, 1, 30.0)
+    assert prepared is not None
+    assert state.history_from == 2
+    assert tool["content"] == "результат"
+    assert state.record["history_start"] == "t-new"
+
+
+def test_dropped_tool_result_can_be_requested_again(database: Database) -> None:
+    state = _state([{"role": "tool", "tool_call_id": "a", "content": "результат"}])
+    state.calls["ключ"] = ToolResult(Status.OK, "результат")
+    state.call_keys["a"] = "ключ"
+    assert state.drop_tool_result()
+    assert state.turn[0]["content"] == DROPPED
+    assert "ключ" not in state.calls
 
 
 def test_call_is_last_when_the_next_would_not_fit(database: Database) -> None:
@@ -252,7 +288,7 @@ def test_old_history_is_dropped_first_and_not_retold(database: Database, small: 
     service, _, _ = _service(database, model)
     session = new_session()
     service.turn("u-eng", session, "Первый вопрос")
-    service.turn("u-eng", session, "Второй вопрос")
+    second = service.turn("u-eng", session, "Второй вопрос")
     third = service.turn("u-eng", session, "Третий вопрос")
     last_input = json.dumps(list(model.requests[-1].messages), ensure_ascii=False)
     assert "Длинный ответ." not in last_input
@@ -261,8 +297,13 @@ def test_old_history_is_dropped_first_and_not_retold(database: Database, small: 
     assert "Второй вопрос" in last_input and "коротко" in last_input
     assert "[Сведения о пользователе" in last_input
     assert _estimate(model.requests[-1]) <= CALL_TOKENS
+    dropped_on = _record(service, "u-eng", second.body["turn_id"])
+    assert dropped_on["dropped_history"] == 2
+    # Третий ход начинает историю там же, где второй: начало входа не сдвигается
+    # от хода к ходу, и отбрасывать заново не нужно.
     record = _record(service, "u-eng", third.body["turn_id"])
-    assert record["dropped_history"] == 2
+    assert "dropped_history" not in record
+    assert record["history_start"] == dropped_on["history_start"]
     # Пересказа нет: дополнительного вызова модели не было.
     assert len(model.requests) == 3
 
@@ -307,10 +348,35 @@ def test_missing_usage_counts_the_estimate(database: Database, small: Path) -> N
     assert call_record["input_estimated"] is True
 
 
+def test_zero_usage_counts_the_estimate(database: Database, small: Path) -> None:
+    model = ScriptedModel([_with_usage(final("ок"), 0)])
+    service, _, _ = _service(database, model)
+    usage = service.turn("u-eng", new_session(), "Вопрос").body["usage"]
+    assert isinstance(usage, dict)
+    assert usage["input_tokens"] == _estimate(model.requests[0])
+
+
+def test_failed_call_counts_its_estimate_in_the_turn(
+    database: Database, small: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Повтор после временной ошибки проверяется с оценкой неудавшегося вызова в бюджете:
+    # бюджет хода с ней не помещает второй вызов.
+    probe = ScriptedModel([final("ок")])
+    probe_service, _, _ = _service(database, probe)
+    probe_service.turn("u-eng", new_session(), "Вопрос")
+    first = _estimate(probe.requests[0])
+    monkeypatch.setattr(agent, "TURN_TOKENS", 2 * first - 1)
+    model = ScriptedModel([TransientModelError("503"), final("ок")])
+    service, _, _ = _service(database, model)
+    reply = service.turn("u-eng", new_session(), "Вопрос")
+    assert len(model.requests) == 1
+    assert reply.body["outcome"] == "budget_exceeded"
+
+
 def test_correction_is_stored_by_model_and_survives_restart(
     database: Database, small: Path
 ) -> None:
-    model = ScriptedModel([_with_usage(final("ок"), 6000)])
+    model = ScriptedModel([_with_usage(final("ок"), 4000)])
     service, _, name = _service(database, model)
     service.turn("u-eng", new_session(), "Вопрос")
     first = _estimate(model.requests[0])
@@ -318,13 +384,13 @@ def test_correction_is_stored_by_model_and_survives_restart(
         factor = connection.scalar(
             text("select factor from app.token_calibration where model = :m"), {"m": name}
         )
-    assert factor == pytest.approx(6000 / Estimator(CharCosts()).raw(model.requests[0]))
+    assert factor == pytest.approx(4000 / Estimator(CharCosts()).raw(model.requests[0]))
 
     # Новый процесс с той же моделью: оценка того же входа уже не меньше факта.
     again = ScriptedModel([_with_usage(final("ок"), 100)])
     restarted, handler, _ = _service(database, again, name)
     restarted.turn("u-eng", new_session(), "Вопрос")
-    assert handler._estimator.request(again.requests[0]) >= 6000 > first
+    assert handler._estimator.request(again.requests[0]) >= 4000 > first
     # Меньший факт поправку не уменьшает.
     with database.service.begin() as connection:
         after = connection.scalar(

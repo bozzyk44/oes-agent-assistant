@@ -37,11 +37,22 @@ _ACTIONS = text(
 )
 
 
+_HISTORY_START = text(
+    """
+    select record ->> 'history_start' from app.turns
+    where user_id = :user_id and session_id = :session_id and record ? 'history_start'
+    order by created_at desc
+    limit 1
+    """
+)
+
+
 @dataclass(frozen=True)
 class HistoryMessage:
     role: str
     text: str
     chunk_ids: tuple[str, ...]
+    turn_id: str = ""
 
 
 def user_info(grants: Grants, periods: dict[str, Period]) -> str:
@@ -73,9 +84,18 @@ def user_info(grants: Grants, periods: dict[str, Period]) -> str:
 def load_history(connection: Connection, user_id: str, session_id: str) -> list[HistoryMessage]:
     rows = connection.execute(_HISTORY, {"user_id": user_id, "session_id": session_id})
     return [
-        HistoryMessage(row.role, str(row.content.get("text", "")), tuple(row.chunk_ids or ()))
+        HistoryMessage(
+            row.role, str(row.content.get("text", "")), tuple(row.chunk_ids or ()), row.turn_id
+        )
         for row in rows
     ]
+
+
+def history_start(connection: Connection, user_id: str, session_id: str) -> str | None:
+    """С какого хода прошлый ход начинал историю: точка отбрасывания наследуется, чтобы
+    начало входа не сдвигалось от хода к ходу и кэш префикса не сбрасывался."""
+    value = connection.scalar(_HISTORY_START, {"user_id": user_id, "session_id": session_id})
+    return str(value) if value else None
 
 
 def actions_block(connection: Connection, user_id: str, session_id: str) -> str:

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from assistant.access import Status, data_periods, load_grants
 from assistant.actions.draft import TOOL as REPAIR_TOOL
@@ -38,6 +39,7 @@ from assistant.turn.context import (
     HistoryMessage,
     actions_block,
     build_messages,
+    history_start,
     load_history,
     user_info,
 )
@@ -93,11 +95,15 @@ class _State:
     history: list[HistoryMessage]
     actions: str
     question: str
+    turn_id: str = ""
     # Сообщения этого хода: ответы модели с вызовами и результаты инструментов.
     turn: list[dict[str, Any]] = field(default_factory=list)
     turn_chunks: set[str] = field(default_factory=set)
     # Сколько первых сообщений истории отброшено ради бюджета.
     history_from: int = 0
+    # Ключ повтора для каждого выполненного вызова: отброшенный результат можно запросить
+    # заново.
+    call_keys: dict[str, str] = field(default_factory=dict)
     # Входные токены уже отправленных вызовов: факт провайдера, иначе оценка.
     spent: int = 0
     last_reply: ModelReply | None = None
@@ -118,21 +124,34 @@ class _State:
         history = self.history[self.history_from :]
         return self.turn_chunks | {chunk for item in history for chunk in item.chunk_ids}
 
-    def drop_one(self) -> bool:
-        """Отбрасывает следующую часть по порядку; `False` — отбрасывать нечего."""
+    def start_at(self, turn_id: str | None) -> None:
+        """История начинается с того же хода, что у прошлого хода сессии."""
+        for index, item in enumerate(self.history):
+            if item.turn_id == turn_id:
+                self.history_from = index
+                return
+
+    def history_cuts(self) -> list[int]:
+        """Точки, где можно отрезать историю: начала ходов после текущего начала и конец."""
+        cuts = [
+            index
+            for index in range(self.history_from + 1, len(self.history))
+            if self.history[index].role == "user"
+        ]
+        return [*cuts, len(self.history)]
+
+    def history_start(self, current_turn: str) -> str:
         if self.history_from < len(self.history):
-            # Ход истории — вопрос и всё до следующего вопроса.
-            self.history_from += 1
-            while (
-                self.history_from < len(self.history)
-                and self.history[self.history_from].role != "user"
-            ):
-                self.history_from += 1
-            self.record["dropped_history"] = self.history_from
-            return True
+            return self.history[self.history_from].turn_id
+        return current_turn
+
+    def drop_tool_result(self) -> bool:
+        """Отбрасывает самый ранний результат инструмента этого хода; `False` — нечего."""
         for message in self.turn:
             if message["role"] == "tool" and message["content"] != DROPPED:
                 message["content"] = DROPPED
+                # Повтор того же вызова теперь выполнится: результата во входе больше нет.
+                self.calls.pop(self.call_keys.pop(message["tool_call_id"], ""), None)
                 self.record["dropped_tool_results"] = self.record.get("dropped_tool_results", 0) + 1
                 return True
         return False
@@ -165,6 +184,7 @@ class AgentHandler:
                 raise ModelError("пользователь не найден")
             info = user_info(grants, data_periods(connection, grants))
             history = load_history(connection, user, session)
+            start = history_start(connection, user, session)
             actions = actions_block(connection, user, session)
             stored = load_factor(connection, self._model_name)
         self._estimator.factor = max(self._estimator.factor, stored)
@@ -174,7 +194,8 @@ class AgentHandler:
             context.message,
             count=self._estimator.text,
         )
-        state = _State(info, history, actions, context.message)
+        state = _State(info, history, actions, context.message, context.turn_id)
+        state.start_at(start)
         state.record["history_chunks"] = sorted(state.seen_chunks())
 
         sent = 0
@@ -203,6 +224,9 @@ class AgentHandler:
             sent += 1
             usage = reply.usage
             actual = usage.input_tokens
+            if actual is not None and actual <= 0:
+                # Нуль или меньше — провайдер вход не посчитал: расхода нет.
+                actual = None
             if actual is None:
                 # Расхода в ответе нет — фактом считается оценка.
                 state.spent += estimate
@@ -263,18 +287,46 @@ class AgentHandler:
                 request = self._request(state.messages(system), last, remaining)
                 estimate = self._estimator.request(request)
             if estimate <= CALL_TOKENS and state.spent + estimate <= TURN_TOKENS:
+                state.record["history_start"] = state.history_start(state.turn_id)
                 return request, estimate, self._estimator.raw(request), last
-            if not state.drop_one():
+            if state.history_from < len(state.history):
+                self._drop_history(state, system, last, remaining)
+                continue
+            if not state.drop_tool_result():
                 state.record["budget"] = {"spent": state.spent, "estimate": estimate}
                 return None
+
+    def _drop_history(
+        self, state: _State, system: dict[str, Any], last: bool, remaining: float
+    ) -> None:
+        """Отбрасывает старые ходы сразу с запасом — до половины того, что ещё можно
+        отправить: отбрасывание сбрасывает кэш от своей точки и не должно повторяться на
+        каждом вызове. Точка — наименьшая, при которой оценка укладывается в запас."""
+        target = min(CALL_TOKENS, TURN_TOKENS - state.spent) // 2
+        cuts = state.history_cuts()
+        low, high = 0, len(cuts) - 1
+        while low < high:
+            middle = (low + high) // 2
+            state.history_from = cuts[middle]
+            request = self._request(state.messages(system), last, remaining)
+            if self._estimator.request(request) <= target:
+                high = middle
+            else:
+                low = middle + 1
+        state.history_from = cuts[low]
+        state.record["dropped_history"] = state.history_from
 
     def _learn(self, user: str, raw: float, actual: int) -> None:
         """Оценка оказалась меньше факта — поправка модели растёт и сохраняется."""
         if not self._estimator.learn(raw, actual):
             return
         log.info("поправка оценки токенов выросла до %.3f", self._estimator.factor)
-        with transaction(self._engine, user) as connection:
-            save_factor(connection, self._model_name, self._estimator.factor)
+        try:
+            with transaction(self._engine, user) as connection:
+                save_factor(connection, self._model_name, self._estimator.factor)
+        except SQLAlchemyError:
+            # Поправка остаётся в памяти; оплаченный вызов из-за неё не теряется.
+            log.warning("поправку оценки токенов не удалось сохранить")
 
     def _stop(self, context: TurnContext, state: _State, reason: str) -> TurnResult:
         """Ход на лимите: текст последнего ответа модели, если он есть, иначе
@@ -339,6 +391,7 @@ class AgentHandler:
                 continue
             result = box.run(call.name, call.arguments)
             state.calls[key] = result
+            state.call_keys[call.call_id] = key
             state.statuses.append(
                 ToolStatus(
                     call.name,
