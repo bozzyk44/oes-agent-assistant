@@ -9,6 +9,7 @@
 import hashlib
 import json
 import logging
+import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -114,6 +115,14 @@ class StoredMessage:
 
 
 @dataclass(frozen=True)
+class ProposedAction:
+    """Черновик действия: записывается завершающей транзакцией хода в статусе `proposed`."""
+
+    tool: str
+    params: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class TurnResult:
     """Итог тела хода. Расхода здесь нет: он копится в `TurnContext.usage`."""
 
@@ -124,6 +133,27 @@ class TurnResult:
     # Запись хода для диагностики и сообщения для истории; у хода с ошибкой истории нет.
     record: dict[str, Any] = field(default_factory=dict)
     messages: tuple[StoredMessage, ...] = ()
+    # Не больше одного действия на ход; у хода с действием `outcome` — `action`.
+    action: ProposedAction | None = None
+
+
+DRAFT_ANSWER = (
+    "Подготовлена заявка на ремонт оборудования {equipment_id}, приоритет {priority}:"
+    " {description}. Заявка будет создана в ТОиР только после вашего подтверждения."
+)
+
+
+def draft_result(
+    prefix_hash: str, tool: str, params: dict[str, Any], record: dict[str, Any] | None = None
+) -> TurnResult:
+    """Итог хода с черновиком: следующего вызова модели нет, текст ответа — шаблон кода."""
+    return TurnResult(
+        outcome="action",
+        answer=DRAFT_ANSWER.format(**params),
+        prefix_hash=prefix_hash,
+        record=record or {},
+        action=ProposedAction(tool, params),
+    )
 
 
 class TurnHandler(Protocol):
@@ -145,6 +175,7 @@ class Runtime:
     monotonic: Callable[[], float]
     new_turn_id: Callable[[], str]
     new_token: Callable[[], UUID]
+    new_action_id: Callable[[], str] = field(default=lambda: f"a-{secrets.token_hex(8)}")
 
 
 class Stored(Enum):
@@ -164,6 +195,8 @@ class Finished:
     usage: UsageTotals
     latency_ms: int
     stored: Stored
+    # Идентификатор записанного действия; клиент получает его, только если ход записан.
+    action_id: str | None = None
 
 
 def empty_prefix_hash() -> str:
@@ -224,8 +257,13 @@ def run_turn(runtime: Runtime, user_id: str, session_id: str, message: str) -> F
             outcome="error", answer=INTERNAL_ERROR, prefix_hash=runtime.handler.prefix_hash
         )
 
+    if result.action is not None and result.outcome != "action":
+        # Действие без исхода `action` — ошибка обработчика: ни то ни другое не отдаётся.
+        log.error("ход %s: действие при исходе %s", turn_id, result.outcome)
+        result = TurnResult(outcome="error", answer=INTERNAL_ERROR, prefix_hash=result.prefix_hash)
+    action_id = runtime.new_action_id() if result.action is not None else None
     latency_ms = int((runtime.monotonic() - started) * 1000)
-    stored = _finish(runtime, context, token, result, latency_ms)
+    stored = _finish(runtime, context, token, result, latency_ms, action_id)
     if stored is not Stored.YES and result.outcome != "error":
         # Ответ, который не записан, клиенту не отдаётся: в истории его не будет.
         result = TurnResult(
@@ -233,11 +271,18 @@ def run_turn(runtime: Runtime, user_id: str, session_id: str, message: str) -> F
             answer=LOST_CAPTURE_ERROR if stored is Stored.LOST_CAPTURE else INTERNAL_ERROR,
             prefix_hash=result.prefix_hash,
         )
-    return Finished(turn_id, result, meter.totals, latency_ms, stored)
+    if stored is not Stored.YES:
+        action_id = None
+    return Finished(turn_id, result, meter.totals, latency_ms, stored, action_id)
 
 
 def _finish(
-    runtime: Runtime, context: TurnContext, token: UUID, result: TurnResult, latency_ms: int
+    runtime: Runtime,
+    context: TurnContext,
+    token: UUID,
+    result: TurnResult,
+    latency_ms: int,
+    action_id: str | None,
 ) -> Stored:
     """Завершающая транзакция: снять отметку под своей меткой и записать ход и сообщения.
 
@@ -286,6 +331,19 @@ def _finish(
                         }
                         for seq, message in enumerate(result.messages, start=1)
                     ],
+                )
+            if result.action is not None and action_id is not None:
+                # Действие — в той же транзакции, что и ход: не записан ход — нет и действия,
+                # и клиент его идентификатора не получит.
+                connection.execute(
+                    insert(models.Action).values(
+                        action_id=action_id,
+                        user_id=context.user_id,
+                        session_id=context.session_id,
+                        turn_id=context.turn_id,
+                        tool=result.action.tool,
+                        params=result.action.params,
+                    )
                 )
         return Stored.YES
     except Exception:

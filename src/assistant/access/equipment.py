@@ -8,6 +8,7 @@
 мог бы выдать чужое оборудование за своё.
 """
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -17,6 +18,19 @@ _LOCATE = text(
     "select name, dwh.equipment_id(name), dwh.equipment_site(name)"
     " from unnest(cast(:names as text[])) as name"
 )
+
+
+# Тот же ключ, что считает база функцией `dwh.equipment_key` (миграция 0002); совпадение
+# проверяет тест.
+_LOOKALIKES = str.maketrans("АВЕКМНОРСТУХавекмнорстух", "ABEKMHOPCTYXABEKMHOPCTYX")
+_SPACES_AND_HYPHENS = re.compile(r"[\s-]")
+
+
+def equipment_key(equipment_id: str) -> str:
+    """Ключ сравнения идентификатора: без регистра, пробелов и дефисов, похожие
+    кириллические буквы приведены к латинским.
+    """
+    return _SPACES_AND_HYPHENS.sub("", equipment_id).translate(_LOOKALIKES).upper()
 
 
 @dataclass(frozen=True)
