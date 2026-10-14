@@ -33,9 +33,25 @@ host() {
     echo "$login@$ip"
 }
 
+# Закрытый ключ — пара к публичному, который Terraform положил на сервер:
+# STAND_SSH_PUBLIC_KEY_FILE без «.pub», из окружения или из .env, как у tf.sh.
+identity() {
+    local pub="${STAND_SSH_PUBLIC_KEY_FILE:-}"
+    if [[ -z "$pub" && -f "$env_file" ]]; then
+        pub="$(grep -E '^STAND_SSH_PUBLIC_KEY_FILE=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
+    fi
+    pub="${pub:-$HOME/.ssh/id_ed25519.pub}"
+    pub="${pub/#\~/$HOME}"
+    echo "${pub%.pub}"
+}
+
 remote() {
-    ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile="$known" "$target" "$@"
+    local key
+    key="$(identity)"
+    local opts=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new
+        -o UserKnownHostsFile="$known")
+    [[ -f "$key" ]] && opts+=(-i "$key" -o IdentitiesOnly=yes)
+    ssh "${opts[@]}" "$target" "$@"
 }
 
 # Сервер отвечает по SSH и закончил первую настройку: Docker стоит.
