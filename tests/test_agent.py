@@ -500,7 +500,8 @@ def _tool(
 
 def _calc(database: Database, **arguments: Any) -> dict[str, Any]:
     """Расчёт с числами в сообщении пользователя: без них входы расчёта без источника."""
-    numbers = " ".join(str(item) for item in arguments.get("numbers", []))
+    # Через «; »: пробел между цифрами по правилу прогона — разряды, «7 9» читалось бы как 79.
+    numbers = "; ".join(str(item) for item in arguments.get("numbers", []))
     message = f"Посчитай: {numbers} {arguments.get('expression', '')}"
     return _tool(database, "u-eng", CALCULATE, message, **arguments)
 
@@ -597,6 +598,30 @@ def test_calculate_reads_expression_numbers_as_evaluated(
         expression=expression,
     )
     assert result["status"] == "invalid"
+
+
+def test_calculate_needs_a_whole_number_in_the_source(database: Database, small: Path) -> None:
+    # «63» — кусок «630», а не число источника; «21» — тоже: целиком в источнике только 210.
+    result, record = _sum_and_percent(database, 21, 63)
+    assert result["status"] == "invalid"
+    assert record["calls"][1]["tool_calls"][0]["unsourced"] == ["21", "63"]
+
+
+@pytest.mark.parametrize(
+    ("message", "expression"),
+    [
+        ("Добыча 2 852,50 т за период с 01.09.2026 по 14.09.2026", "2852.5 / 14"),
+        ("Простой 3,5 ч за 2 смены", "3.5 / 2"),
+    ],
+)
+def test_calculate_accepts_number_groups_and_decimal_comma(
+    database: Database, small: Path, message: str, expression: str
+) -> None:
+    # Число из даты — её группа цифр; десятичная запятая и пробел в разрядах нормализуются.
+    result = _tool(
+        database, "u-eng", CALCULATE, message, operation="expression", expression=expression
+    )
+    assert result["status"] == "ok"
 
 
 def test_calculate_constant_100_needs_no_source(database: Database, small: Path) -> None:

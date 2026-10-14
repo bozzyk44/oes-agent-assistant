@@ -13,6 +13,7 @@
 """
 
 import json
+import re
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -33,7 +34,7 @@ from assistant.access import (
 )
 from assistant.actions.draft import prepare_repair
 from assistant.ingest.chunks import TOOL_RESULT_TOKENS
-from assistant.tools.arith import BadExpression, evaluate, literals, normalize_digits
+from assistant.tools.arith import NUMBER, BadExpression, evaluate, literals, normalize_digits
 from assistant.tools.kpi import _number, round_half_up, run_kpi
 from assistant.tools.schemas import (
     ARGUMENTS,
@@ -144,7 +145,8 @@ class ToolBox:
                     return self._kpi(connection, args)
                 case CalculateArgs():
                     return _calculate(
-                        args, normalize_digits("\n".join([self.message, *self.sources]))
+                        args,
+                        source_numbers(normalize_digits("\n".join([self.message, *self.sources]))),
                     )
                 case RepairArgs():
                     return self._repair(connection, arguments)
@@ -296,15 +298,23 @@ def _plain(value: Decimal) -> str:
     return format(abs(value).normalize(), "f")
 
 
-def _unsourced(args: CalculateArgs, sources: str) -> list[str]:
+_DIGITS = re.compile(r"\d+")
+
+
+def source_numbers(text: str) -> set[str]:
+    """Числа источника целиком и их группы цифр: «14.09.2026» даёт 14.09, 14, 9 и 2026,
+    «2 852,50» — 2852.5, 2852 и 50. Число входа опирается только на целое число или целую
+    группу: «1143» на «114300» не опирается.
+    """
+    found = NUMBER.findall(text) + _DIGITS.findall(text)
+    return {_plain(Decimal(item)) for item in found}
+
+
+def _unsourced(args: CalculateArgs, sources: set[str]) -> list[str]:
     """Входы расчёта, которых нет ни в результатах инструментов хода, ни в сообщении
-    пользователя. Сравнение — подстрокой после той же нормализации, что у прогона: «2852.5»
+    пользователя. Числа сравниваются после той же нормализации, что у прогона: «2852.5»
     опирается на «2 852,50» документа. Результат прежнего расчёта — тоже опора: его входы
     уже проверены.
-
-    Граница числа не проверяется: «1143» опирается на «114300». Строгое сравнение отвергло
-    бы законные выводные числа — дни периода из дат вопроса, — а защита ловит число,
-    которого нет нигде, как в провале расчёта по выдуманному факту.
     """
     if args.operation == "expression":
         values = literals(args.expression or "")
@@ -314,7 +324,7 @@ def _unsourced(args: CalculateArgs, sources: str) -> list[str]:
     return [item for item in inputs if item not in CONSTANTS and item not in sources]
 
 
-def _calculate(args: CalculateArgs, sources: str) -> ToolResult:
+def _calculate(args: CalculateArgs, sources: set[str]) -> ToolResult:
     numbers = args.numbers
     try:
         match args.operation:
