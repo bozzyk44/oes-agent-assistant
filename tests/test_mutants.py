@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from assistant.actions.toir import Reply
 from assistant.ingest.bootstrap import read_account
@@ -135,6 +135,10 @@ def test_the_set_catches_the_mutant(
     if mutant.single_barrier:
         # Один барьер из двух держит утечки; исход может разойтись — это допустимо.
         assert leaks == set(), [line["checks"] for line in lines if line["leak"]]
+        if mutant.patches is not None:
+            # Без кода слоя доступа отказ по КХД становится пустым результатом: расхождение
+            # исхода показывает, что код в этом мутанте действительно не отсекает.
+            assert failed, "мутант без кода слоя доступа ведёт себя как контроль"
     else:
         assert failed == _expected(root, mutant), [
             (line["question"]["id"], line["checks"]) for line in lines
@@ -241,3 +245,67 @@ def test_table_counts_only_failures_the_control_did_not_have(tmp_path: Path) -> 
     assert "1 из 2: a; ещё c" in rows["docs"]
     assert "утечек 0; исход разошёлся: a" in rows["policies-only"]
     assert rows["kpi"].endswith("| — | — |")
+
+
+@pytest.mark.parametrize("table", ["dwh.production", "kb.chunks"])
+def test_bypass_role_skips_row_security(
+    database: Database, bypass_url: str, dataset: tuple[Path, World], table: str
+) -> None:
+    """Роль мутантов без политик видит все строки от имени любого пользователя, роль
+    сервиса — не все: иначе мутант «только код» был бы неотличим от контроля."""
+    from assistant.db.session import transaction
+
+    root, _ = dataset
+    database.load(root, fresh=True)
+    query = text(f"select count(*) from {table}")  # noqa: S608 — имя из списка выше
+    with database.owner.connect() as connection:
+        total = connection.scalar(query)
+        users = list(connection.scalars(text("select user_id from app.users")))
+    bypass = create_engine(bypass_url)
+    try:
+        seen = {}
+        for user in users:
+            with transaction(bypass, user) as connection:
+                assert connection.scalar(query) == total, user
+            with transaction(database.service, user) as connection:
+                seen[user] = connection.scalar(query)
+    finally:
+        bypass.dispose()
+    assert min(seen.values()) < total
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        mutant.name
+        for mutant in MUTANTS
+        if mutant.name in {"docs", "kpi", "repair", "policies-only"}
+    ],
+)
+def test_widened_grants_cover_everything_named(
+    database: Database, dataset: tuple[Path, World], name: str
+) -> None:
+    """Подмена полномочий действует: код слоя доступа больше ничего не отсекает."""
+    from assistant.access import grants as module
+    from assistant.db.session import transaction
+    from assistant.tools.schemas import KPI_COLUMNS
+
+    root, _ = dataset
+    database.load(root, fresh=True)
+    mutant = BY_NAME[name]
+    with database.owner.connect() as connection:
+        users = list(connection.scalars(text("select user_id from app.users")))
+        groups = set(connection.scalars(text("select group_name from app.user_groups")))
+    for user in users:
+        with transaction(database.service, user) as connection:
+            before = module.load_grants(connection, user)
+            with applied(mutant):
+                after = module.load_grants(connection, user)
+        assert before is not None and after is not None
+        docs = name in {"docs", "policies-only"}
+        kpi = name in {"kpi", "policies-only"}
+        assert after.groups == (frozenset(groups) if docs else before.groups)
+        expected_kpi = dict.fromkeys(KPI_COLUMNS, before.known_sites) if kpi else before.kpi
+        assert after.kpi == expected_kpi
+        expected_repair = before.known_sites if name == "repair" else before.repair_sites
+        assert after.repair_sites == expected_repair

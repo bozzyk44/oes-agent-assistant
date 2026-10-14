@@ -40,7 +40,7 @@ trap cleanup EXIT INT TERM
 
 $compose down --volumes --remove-orphans >/dev/null 2>&1 || true
 $compose build --quiet
-names=${MUTANTS:-$($compose run --rm --no-deps mutant-table python -m tests.mutants names)}
+names=${MUTANTS:-$($compose run --rm --no-deps -T mutant-table python -m tests.mutants names)}
 case " $names " in
     *" control "*) ;;
     # Без контроля провал мутанта нечем отличить от провала, который был бы и без него.
