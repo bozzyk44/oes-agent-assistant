@@ -17,6 +17,7 @@ from datagen.questions import (
     ACTION_TOOL,
     CASES,
     DOUBLE_CASES,
+    MIN_NAME_PART,
     accessible_text,
     build_questions,
     users_by_id,
@@ -269,6 +270,11 @@ def _check_question_set(root: Path, world: World, problems: list[str]) -> None:
                 problems.append(f"вопросы: ответ {question.qid} есть в служебной записке")
         if any("ё" in value for value in question.must_include):
             problems.append(f"вопросы: в must_include {question.qid} есть «ё»")
+        if any(
+            not any(char.isdigit() for char in value) and len(value) < MIN_NAME_PART
+            for value in question.must_include
+        ):
+            problems.append(f"вопросы: в must_include {question.qid} слишком короткое слово")
         for label in question.labels:
             body = (root / "docs" / f"{label.doc_id}.md").read_text(encoding="utf-8")
             if f"\n## {label.section}. " not in body:

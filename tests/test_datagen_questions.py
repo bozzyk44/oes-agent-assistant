@@ -76,7 +76,7 @@ def test_kpi_expectations_are_recomputed_from_files(dataset: Dataset) -> None:
     assert min(tonnes) * 2 < sorted(tonnes)[len(tonnes) // 2]
     tonnes = [int(row["tonnes"]) for row in production if row["site"] == mean.basis["site"]]
     average = (Decimal(sum(tonnes)) / len(tonnes)).quantize(Decimal("0.1"), ROUND_HALF_UP)
-    assert _expected(root, mean.qid)["must_include"] == [str(average)]
+    assert _expected(root, mean.qid)["must_include"] == [str(average).removesuffix(".0")]
 
     (plan,) = _by_case(world, "kpi_and_doc")
     site = plan.basis["site"]
@@ -84,7 +84,7 @@ def test_kpi_expectations_are_recomputed_from_files(dataset: Dataset) -> None:
     days = len({row["date"] for row in production})
     planned = world.shift_plan[site] * 2 * days
     percent = (Decimal(produced) * 100 / planned).quantize(Decimal("0.1"), ROUND_HALF_UP)
-    assert _expected(root, plan.qid)["must_include"] == [str(percent)]
+    assert _expected(root, plan.qid)["must_include"] == [str(percent).removesuffix(".0")]
 
     (similar,) = _by_case(world, "kpi_not_similar_doc")
     minutes = _downtime_minutes(root, similar.basis["site"], similar.basis["reason"])
@@ -284,3 +284,20 @@ def test_holdout_seed_is_neither_data_nor_test_seed() -> None:
     from datagen.world import DEFAULT_SEED, HOLDOUT_SEED, SECOND_SEED
 
     assert HOLDOUT_SEED not in (DEFAULT_SEED, SECOND_SEED)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Виноградова Наталья Борисовна", "Виноградов"),
+        ("Соколов Дмитрий Андреевич", "Соколов"),
+        ("Воробьёва Светлана Дмитриевна", "Воробь"),
+        ("Фёдоров Алексей Михайлович", "доров"),
+        # Кусок без «ё» короче пяти букв нашёлся бы в любом ответе: фамилии в ожидании нет.
+        ("Семёнова Ирина Олеговна", None),
+    ],
+)
+def test_surname_part_matches_declension_and_e_spelling(name: str, expected: str | None) -> None:
+    from datagen.questions import _surname
+
+    assert _surname(name) == expected

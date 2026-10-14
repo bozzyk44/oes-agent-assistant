@@ -122,7 +122,9 @@ def _round(value: Decimal, places: int = 1) -> str:
     """Округление «половина вверх», как в инструменте расчёта; точка — как после
     нормализации строк в прогоне.
     """
-    return str(value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP))
+    # Целое — без «.0»: ответ «2206 т» верен и для 2206,0.
+    text = str(value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP))
+    return text.removesuffix(".0")
 
 
 _ACL = re.compile(r"^acl: \[(.*)\]$", re.MULTILINE)
@@ -182,14 +184,19 @@ def _hours(minutes: int) -> str:
     return text.removesuffix(".0")
 
 
-def _surname(name: str) -> str:
+# Короче — и кусок фамилии найдётся в любом ответе: «Ф» есть в слове «телефон».
+MIN_NAME_PART = 5
+
+
+def _surname(name: str) -> str | None:
     """Фамилия для сравнения вхождением: женская — без окончания, чтобы «Виноградовой»
-    в ответе тоже совпало.
+    в ответе тоже совпало. Правило сравнения «ё» к «е» не приводит, а модели пишут то так,
+    то так: берётся самый длинный кусок без «ё». Короче `MIN_NAME_PART` — `None`.
     """
     surname = name.split()[0]
     surname = surname[:-1] if surname.endswith(("а", "я")) else surname
-    # Правило сравнения «ё» к «е» не приводит, а модели пишут то так, то так: до «ё».
-    return surname.split("ё")[0]
+    part = max(surname.split("ё"), key=len)
+    return part if len(part) >= MIN_NAME_PART else None
 
 
 def period_minutes(world: World, site: str, reason: str) -> int:
@@ -360,6 +367,9 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
     # Ответ из двух документов: приказ называет ответственного, справочник — телефон.
     person = world.responsibles[own_site]
     surname = _surname(person.person.name)
+    # Без фамилии ловушку держит телефон: его даёт только справочник, а чей он — только
+    # приказ.
+    contact = (person.phone,) if surname is None else (surname, person.phone)
     questions.append(
         Question(
             "q05",
@@ -370,7 +380,7 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
                 "Дай контакт ответственного за ППР моего участка: фамилию и телефон.",
             ),
             "answer",
-            must_include=(surname, person.phone),
+            must_include=contact,
             must_cite=(docs["order"].doc_id, docs["contacts"].doc_id),
             note="Ответственный — из приказа, телефон — только в справочнике контактов",
             labels=(Label(docs["order"].doc_id, 2), Label(docs["contacts"].doc_id, 2)),
