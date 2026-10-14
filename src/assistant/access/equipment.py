@@ -8,33 +8,19 @@
 мог бы выдать чужое оборудование за своё.
 """
 
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 from sqlalchemy import Connection, text
 
+from assistant.lookalikes import equipment_key
+
+__all__ = ["Located", "equipment_key", "locate"]
+
 _LOCATE = text(
     "select name, dwh.equipment_id(name), dwh.equipment_site(name)"
     " from unnest(cast(:names as text[])) as name"
 )
-
-
-# Тот же ключ, что считает база функцией `dwh.equipment_key` (миграция 0003), теми же
-# явными таблицами — без зависимости от локали; совпадение проверяет тест.
-_UPPER = str.maketrans(
-    "abcdefghijklmnopqrstuvwxyzабвгдеёжзийклмнопрстуфхцчшщъыьэюя",
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ",
-)
-_LOOKALIKES = str.maketrans("АВЕКМНОРСТУХ", "ABEKMHOPCTYX")
-_SPACES_AND_HYPHENS = re.compile(r"[ \t\n\r\f\v-]")
-
-
-def equipment_key(equipment_id: str) -> str:
-    """Ключ сравнения идентификатора: без регистра, пробелов и дефисов, похожие
-    кириллические буквы приведены к латинским.
-    """
-    return _SPACES_AND_HYPHENS.sub("", equipment_id).translate(_UPPER).translate(_LOOKALIKES)
 
 
 @dataclass(frozen=True)

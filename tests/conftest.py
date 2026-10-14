@@ -1,3 +1,4 @@
+import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -37,6 +38,25 @@ def dataset(
 OWNER_PASSWORD = "test-owner-password-marker-91ab"
 SERVICE_PASSWORD = "test-service-password-marker-3e7d"
 TOIR_PASSWORD = "test-toir-password-marker-c240"
+
+
+@pytest.fixture(autouse=True)
+def secrets_stay_out_of_log(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
+    """Общая проверка для каждого теста: ни одна метка секрета не попала в журнал.
+
+    Ответы API и входы модели проверяются там, где они есть; журнал — здесь, чтобы новый
+    тест получал проверку без усилий автора.
+    """
+    from tests.servicekit import MODEL_KEY, TOIR_TOKEN
+
+    caplog.set_level(logging.DEBUG)
+    yield
+    leaked = [
+        marker
+        for marker in (TOIR_TOKEN, MODEL_KEY, OWNER_PASSWORD, SERVICE_PASSWORD, TOIR_PASSWORD)
+        if marker in caplog.text
+    ]
+    assert leaked == [], "метка секрета в журнале"
 
 
 @dataclass(frozen=True)

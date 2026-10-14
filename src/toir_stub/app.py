@@ -200,6 +200,8 @@ def build_app(engine: Engine, token: str) -> FastAPI:
     @app.get("/requests", dependencies=guarded)
     def list_requests(idempotency_key: str | None = None) -> list[StoredRequest]:
         """Все заявки по порядку создания; с `idempotency_key` — только заявка с этим ключом."""
+        if idempotency_key is not None and "\x00" in idempotency_key:
+            raise HTTPException(status_code=422, detail="нулевой символ в ключе")
         with engine.connect() as connection:
             return [_stored(row) for row in connection.execute(_ALL, {"key": idempotency_key})]
 

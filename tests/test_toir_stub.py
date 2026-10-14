@@ -11,10 +11,11 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import Engine, create_engine, text
 
 from tests.conftest import Database
-from toir_stub.app import ConfigError, build_app, create_app
+from toir_stub.app import ConfigError, RepairRequest, build_app, create_app
 
 pytestmark = pytest.mark.db
 
@@ -153,6 +154,20 @@ def test_idempotency_key_is_required(client: TestClient, key: str | None) -> Non
 def test_lone_surrogate_is_422_not_500(client: TestClient) -> None:
     raw = b'{"equipment_id": "XY-7", "description": "\\ud800", "priority": 1}'
     reply = client.post("/requests", content=raw, headers={**AUTH, "Idempotency-Key": _key()})
+    assert reply.status_code == 422
+
+
+def test_model_rejects_lone_surrogate_without_json() -> None:
+    # Одиночный суррогат отвергается и вне разбора JSON: строку такого вида pydantic
+    # не принимает сам, а нулевой символ ловит валидатор схемы.
+    with pytest.raises(ValidationError):
+        RepairRequest.model_validate({**BODY, "description": "\ud800"})
+    with pytest.raises(ValidationError, match="нулевой символ"):
+        RepairRequest.model_validate({**BODY, "description": "a\x00b"})
+
+
+def test_list_with_null_in_key_is_422(client: TestClient) -> None:
+    reply = client.get("/requests", headers=AUTH, params={"idempotency_key": "a\x00b"})
     assert reply.status_code == 422
 
 

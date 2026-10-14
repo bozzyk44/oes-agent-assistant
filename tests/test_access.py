@@ -123,7 +123,7 @@ def test_repair_request(connect: Barrier) -> None:
     with _open(connect, "u-k1") as (connection, grants):
         ok = check_repair(connection, grants, " EX-1 ")
         foreign = check_repair(connection, grants, "EX-2")
-    assert (ok.status, ok.site) == (Status.OK, "K1")
+    assert (ok.status, ok.site, ok.equipment_id) == (Status.OK, "K1", "EX-1")
     # Отказ не сообщает, на каком участке оборудование.
     assert (foreign.status, foreign.site, foreign.equipment_id) == (Status.DENIED, None, None)
     for user in ("u-fin", "u-hr"):

@@ -86,10 +86,13 @@ def test_single_long_line_is_cut_at_spaces() -> None:
 
 def test_exact_terms_are_identifiers_and_numbers() -> None:
     terms = exact_terms("Экскаватор EX-03 модели ЭКГ-10, ёмкость 12,5 м3, план 137 400, пункт 4.2")
-    assert terms == sorted({"ex-03", "экг-10", "12.5", "м3", "137", "400", "4.2"})
+    # Похожие кириллические буквы — латинские: «к» в «экг», «м» в «м3».
+    assert terms == sorted({"ex-03", "эkг-10", "12.5", "m3", "137", "400", "4.2"})
     assert exact_terms("Слова без цифр и дефис-слова") == []
     # Косая черта идентификаторы не склеивает; запятая и точка в числе — одно и то же.
-    assert exact_terms("EX-02/EX-03, ЭКГ-10/ЭКГ-12") == ["ex-02", "ex-03", "экг-10", "экг-12"]
+    assert exact_terms("EX-02/EX-03, ЭКГ-10/ЭКГ-12") == ["ex-02", "ex-03", "эkг-10", "эkг-12"]
+    # Кириллица и латиница в идентификаторе дают один термин.
+    assert exact_terms("ЕХ-03") == exact_terms("EX-03") == ["ex-03"]
     assert exact_terms("38,1 и 38.1") == ["38.1"]
 
 

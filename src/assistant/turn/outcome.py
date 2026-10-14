@@ -74,8 +74,14 @@ def resolve_outcome(
         # КХД или документ по идентификатору — с ответом `ok`, `empty` или `not_found`.
         # Поиск без цитаты не в счёт: через «или» он почти всегда что-то возвращает,
         # и обоснованный отказ модели иначе становился бы `no_data`.
+        # Пустой поиск без закрытого совпадения — тоже законное отсутствие: подходящего нет
+        # нигде, ни в открытом, ни в закрытом.
         reached = cited or any(
-            call.tool in DIRECT_TOOLS and call.status in (Status.OK, Status.EMPTY, Status.NOT_FOUND)
+            (
+                call.tool in DIRECT_TOOLS
+                and call.status in (Status.OK, Status.EMPTY, Status.NOT_FOUND)
+            )
+            or (call.tool == SEARCH and call.status is Status.EMPTY)
             for call in calls
         )
         return Verdict("no_data" if reached else "refusal", 5)

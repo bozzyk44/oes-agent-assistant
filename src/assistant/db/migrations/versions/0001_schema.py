@@ -313,8 +313,9 @@ language sql stable security definer
 set search_path = pg_catalog, pg_temp
 as $$ select exists (select 1 from kb.documents d where d.doc_id = p_doc_id) $$;
 
--- Идентификатор сравнивается как есть. Если в наборе он встречается несколько раз,
--- берётся первая строка по порядку файла.
+-- Идентификатор сравнивается как есть; в 0002 сравнение заменено на точное или по
+-- однозначному ключу. Если в наборе он встречается несколько раз, берётся первая строка
+-- по порядку файла.
 create function dwh.equipment_site(p_equipment_id text) returns text
 language sql stable security definer
 set search_path = pg_catalog, pg_temp
