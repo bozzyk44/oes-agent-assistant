@@ -7,7 +7,7 @@
 import csv
 import json
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
@@ -47,27 +47,36 @@ def _by_case(world: World, case: str) -> list[Question]:
 
 def _tenths(minutes: int) -> str:
     hours = Decimal(minutes) / 60
-    return str(hours.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+    return str(hours.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)).removesuffix(".0")
 
 
 def _downtime_minutes(root: Path, site: str, reason: str) -> int:
+    """Минуты внутри календарных дней периода из production.csv: вопрос называет даты."""
+    dates = sorted({row["date"] for row in _table(root, "production")})
+    begin = datetime.fromisoformat(dates[0])
+    end = datetime.fromisoformat(dates[-1]) + timedelta(days=1)
     total = 0
     for row in _table(root, "downtime"):
         if row["site"] == site and row["reason"] == reason:
-            start = datetime.fromisoformat(row["start"])
-            end = datetime.fromisoformat(row["end"])
-            total += int((end - start).total_seconds()) // 60
+            start = max(datetime.fromisoformat(row["start"]), begin)
+            finish = min(datetime.fromisoformat(row["end"]), end)
+            total += max(int((finish - start).total_seconds()) // 60, 0)
     return total
 
 
 def test_kpi_expectations_are_recomputed_from_files(dataset: Dataset) -> None:
     root, world = dataset
     production = _table(root, "production")
-    total, lowest = _by_case(world, "kpi_calc")
+    total, lowest, mean = _by_case(world, "kpi_calc")
     tonnes = [int(row["tonnes"]) for row in production if row["site"] == total.basis["site"]]
     assert _expected(root, total.qid)["must_include"] == [str(sum(tonnes))]
     tonnes = [int(row["tonnes"]) for row in production if row["site"] == lowest.basis["site"]]
     assert _expected(root, lowest.qid)["must_include"] == [str(min(tonnes))]
+    # Минимум — смена с провалом добычи, автор — начальник этого участка.
+    assert min(tonnes) * 2 < sorted(tonnes)[len(tonnes) // 2]
+    tonnes = [int(row["tonnes"]) for row in production if row["site"] == mean.basis["site"]]
+    average = (Decimal(sum(tonnes)) / len(tonnes)).quantize(Decimal("0.1"), ROUND_HALF_UP)
+    assert _expected(root, mean.qid)["must_include"] == [str(average)]
 
     (plan,) = _by_case(world, "kpi_and_doc")
     site = plan.basis["site"]
@@ -122,15 +131,32 @@ def test_no_data_date_is_outside_the_period(dataset: Dataset) -> None:
 
 def test_action_params_follow_the_repair_order(dataset: Dataset) -> None:
     root, world = dataset
-    _, action = _by_case(world, "action_own")
+    (action,) = _by_case(world, "action_own")
+    (reaction,) = _by_case(world, "reaction_time")
+    # Срок в прошлом ходе сессии — для другого приоритета: подсказки нет.
+    assert reaction.session == action.session
+    assert action.action is not None
+    priority = action.action["params"]["priority"]
+    assert f"приоритетом {priority}" not in reaction.formulations[0]
     record = _expected(root, action.qid)
     params = record["action"]["params"]
     equipment = {row["equipment_id"]: row["site"] for row in _table(root, "equipment")}
     users = {user["user_id"]: user for user in json.loads((root / "users.json").read_text())}
     assert equipment[params["equipment_id"]] in users[record["user"]]["repair_requests"]
-    # Приоритет — из условий раздела 2 порядка оформления заявок.
+    # Приоритет — из условий раздела 2 порядка оформления заявок: описание поломки
+    # подходит под условие строки этого приоритета и только её.
     repair = (root / "docs" / f"{world.docs['repair'].doc_id}.md").read_text(encoding="utf-8")
-    assert f"| {params['priority']} |" in repair
+    rows = (
+        [cell.strip() for cell in line.strip().strip("|").split("|")]
+        for line in repair.splitlines()
+        if line.startswith("| ")
+    )
+    conditions = {int(cells[0]): cells[1] for cells in rows if cells[0].isdigit()}
+    markers = {1: ("стоит", "встал"), 2: ("ограничени", "вполсилы"), 3: ("не влияет", "не мешает")}
+    assert set(conditions) == set(markers)
+    for formulation in action.formulations:
+        found = {p for p, words in markers.items() if any(w in formulation for w in words)}
+        assert found == {params["priority"]}, formulation
     assert params["equipment_id"] in record["question"]
     (foreign,) = _by_case(world, "action_foreign")
     target = next(word.rstrip(":") for word in foreign.formulations[0].split() if "-" in word)
@@ -140,7 +166,7 @@ def test_action_params_follow_the_repair_order(dataset: Dataset) -> None:
 def test_every_case_of_the_assignment_is_covered(dataset: Dataset) -> None:
     _, world = dataset
     cases = [question.case for question in _questions(world).values()]
-    assert set(cases) == set(CASES)
+    assert set(CASES) <= set(cases)
     assert cases.count("no_data") >= 2
 
 

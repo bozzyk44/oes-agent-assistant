@@ -238,7 +238,12 @@ def _check_question_set(root: Path, world: World, problems: list[str]) -> None:
             sessions[record["session"]] = sessions.get(record["session"], 0) + 1
     if sum(1 for count in sessions.values() if count >= 2) < MIN_SESSIONS:
         problems.append(f"questions.jsonl: сессий из двух вопросов и больше меньше {MIN_SESSIONS}")
-    cases = [question.case for question in expected]
+    # Случай засчитан вопросом с тем исходом, ради которого он в таблице задания.
+    cases = [
+        question.case
+        for question in expected
+        if question.case != "action_own" or question.expect == "action"
+    ]
     for case in CASES:
         need = 2 if case in DOUBLE_CASES else 1
         if cases.count(case) < need:
@@ -258,6 +263,12 @@ def _check_question_set(root: Path, world: World, problems: list[str]) -> None:
             equipment = question.action["params"]["equipment_id"]
             if sites.get(equipment) not in user.repair_requests:
                 problems.append(f"вопросы: {question.qid} — заявка вне прав автора")
+        if question.case == "kpi_not_similar_doc":
+            memo = (root / "docs" / f"{world.docs['memo'].doc_id}.md").read_text(encoding="utf-8")
+            if any(normalize(value) in normalize(memo) for value in question.must_include):
+                problems.append(f"вопросы: ответ {question.qid} есть в служебной записке")
+        if any("ё" in value for value in question.must_include):
+            problems.append(f"вопросы: в must_include {question.qid} есть «ё»")
         for label in question.labels:
             body = (root / "docs" / f"{label.doc_id}.md").read_text(encoding="utf-8")
             if f"\n## {label.section}. " not in body:
