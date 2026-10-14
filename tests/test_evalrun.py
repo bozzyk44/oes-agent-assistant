@@ -265,6 +265,11 @@ def test_calculate_inputs_and_calls_in_text() -> None:
     diag = diagnose(record, "Выполнение плана за 14 дней?", "274.9 %")
     assert diag is not None
     assert diag["calls_in_text"] == 1
+    # Одинокий маркер без тела вызова — не потерянный вызов.
+    record["calls"][0]["content"] = "<|tool_call>"
+    stray = diagnose(record, "Выполнение плана за 14 дней?", "")
+    assert stray is not None and stray["calls_in_text"] == 0
+    record["calls"][0]["content"] = leaked
     # 2970 — из поиска, 14 — из вопроса, 100 — постоянная; 114300 опоры не имеет, хотя
     # и стоит в результате самого расчёта.
     assert (diag["calculate_inputs"], diag["calculate_inputs_grounded"]) == (3, 2)
