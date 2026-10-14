@@ -120,7 +120,7 @@ def test_kpi_table_without_grant_is_denied_and_not_queried(connect: Barrier) -> 
 
 def test_repair_request(connect: Barrier) -> None:
     with _open(connect, "u-k1") as (connection, grants):
-        ok = check_repair(connection, grants, "EX-1")
+        ok = check_repair(connection, grants, " EX-1 ")
         foreign = check_repair(connection, grants, "EX-2")
     assert (ok.status, ok.site) == (Status.OK, "K1")
     # Отказ не сообщает, на каком участке оборудование.
@@ -213,6 +213,12 @@ def test_status_empty(connect: Barrier) -> None:
         KpiQuery("production", (Filter("site", "in", "K1"),)),
         KpiQuery("production", (Filter("site", "eq", 1),)),
         KpiQuery("production", (Filter("site", "like", "K%"),)),  # type: ignore[arg-type]
+        KpiQuery("production", (Filter("shift", "eq", 40_000),)),
+        KpiQuery("production", (Filter("tonnes", "gt", "99999999999999999999"),)),
+        KpiQuery("downtime", (Filter("start", "gte", "2026-01-01T00:00+03:00"),)),
+        KpiQuery("production", (Filter(["site"], "eq", "K1"),)),  # type: ignore[arg-type]
+        KpiQuery("production", (Filter("site", ["eq"], "K1"),)),  # type: ignore[arg-type]
+        KpiQuery(["production"]),  # type: ignore[arg-type]
         KpiQuery("production", limit=0),
         KpiQuery("production", limit=10_000),
     ],
@@ -234,12 +240,17 @@ def test_mixed_sites_give_own_data_and_list_denied(connect: Barrier) -> None:
             grants,
             KpiQuery(
                 "downtime",
-                (Filter("site", "in", ["K1", "K2"]), Filter("equipment_id", "in", ["T-1", "EX-2"])),
+                (
+                    Filter("site", "in", ["K1", "K2"]),
+                    Filter("equipment_id", "in", [" T-1 ", "EX-2", "EX-9"]),
+                ),
             ),
         )
     assert result.status is Status.OK
     assert [row["equipment_id"] for row in result.rows] == ["T-1"]
     assert (result.denied_sites, result.denied_equipment) == (("K2",), ("EX-2",))
+    # Неизвестное оборудование не теряется молча: модель узнает, что его нет.
+    assert result.missing_equipment == ("EX-9",)
     assert result.partially_denied
 
 

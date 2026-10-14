@@ -112,7 +112,8 @@ def search(
 
 
 def get_document(connection: Connection, grants: Grants, ref: str) -> DocumentResult:
-    """Документ целиком или один фрагмент по ссылке `<документ>` или `<документ>#<раздел>`.
+    """Документ целиком, раздел или его часть по ссылке `<документ>`, `<документ>#<раздел>`
+    или `<документ>#<раздел>.<часть>`.
 
     Нет доступа — `denied` без названия, даты и текста. Есть ли такой документ вообще,
     сообщает функция базы, отвечающая одним битом.
@@ -129,7 +130,12 @@ def get_document(connection: Connection, grants: Grants, ref: str) -> DocumentRe
         exists = bool(connection.scalar(_EXISTS, {"doc_id": doc_id}))
         return DocumentResult(Status.DENIED if exists else Status.NOT_FOUND)
     if "#" in ref:
-        chunks = tuple(chunk for chunk in chunks if chunk.chunk_id == ref)
+        # Ссылка на раздел даёт и все его части: длинный раздел хранится как `#3.1`, `#3.2`.
+        chunks = tuple(
+            chunk
+            for chunk in chunks
+            if chunk.chunk_id == ref or chunk.chunk_id.startswith(f"{ref}.")
+        )
         if not chunks:
             return DocumentResult(Status.NOT_FOUND)
     return DocumentResult(Status.OK, chunks)

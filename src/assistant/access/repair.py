@@ -2,14 +2,11 @@
 
 from dataclasses import dataclass
 
-from sqlalchemy import Connection, text
+from sqlalchemy import Connection
 
+from assistant.access.equipment import equipment_sites, normalize
 from assistant.access.grants import Grants
 from assistant.access.status import Status
-
-# Функция базы в обход политик: право на заявку задаётся отдельно от права на таблицу
-# оборудования, и пользователь может оформлять заявки, не видя этой таблицы.
-_EQUIPMENT_SITE = text("select dwh.equipment_site(:equipment_id)")
 
 
 @dataclass(frozen=True)
@@ -25,7 +22,8 @@ def check_repair(connection: Connection, grants: Grants, equipment_id: str) -> R
     Участок берётся из базы, а не из слов модели. Не совпал с полномочием — `denied`,
     и действие не создаётся.
     """
-    site = connection.scalar(_EQUIPMENT_SITE, {"equipment_id": equipment_id})
+    equipment_id = normalize(equipment_id)
+    site = equipment_sites(connection, [equipment_id]).get(equipment_id)
     if site is None:
         return RepairCheck(Status.NOT_FOUND)
     if site not in grants.repair_sites:

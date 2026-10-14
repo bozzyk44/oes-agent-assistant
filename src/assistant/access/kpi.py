@@ -11,9 +11,20 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Literal
 
-from sqlalchemy import Column, ColumnElement, Connection, Date, DateTime, Integer, Table, select
-from sqlalchemy import text as sql_text
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    ColumnElement,
+    Connection,
+    Date,
+    DateTime,
+    Integer,
+    SmallInteger,
+    Table,
+    select,
+)
 
+from assistant.access.equipment import equipment_sites, normalize
 from assistant.access.grants import Grants
 from assistant.access.status import Status
 from assistant.db import models
@@ -33,8 +44,9 @@ MAX_LIMIT = 1000
 Op = Literal["eq", "in", "gt", "gte", "lt", "lte"]
 _LISTS = frozenset({"eq", "in"})
 _COMPARISONS = frozenset({"gt", "gte", "lt", "lte"})
-
-_EQUIPMENT_SITE = sql_text("select dwh.equipment_site(:equipment_id)")
+# Границы целых колонок: значение за ними база отвергла бы ошибкой, которая оборвала бы
+# транзакцию хода, а не дала `invalid`.
+_INT_BOUNDS = ((SmallInteger, 2**15), (BigInteger, 2**63), (Integer, 2**31))
 
 
 @dataclass(frozen=True)
@@ -61,6 +73,8 @@ class KpiResult:
     # Явно названные участки и оборудование, в которых отказано.
     denied_sites: tuple[str, ...] = ()
     denied_equipment: tuple[str, ...] = ()
+    # Названное оборудование, которого нет в наборе, когда другое названное нашлось.
+    missing_equipment: tuple[str, ...] = ()
     # Строк больше, чем `limit`: выдача неполная.
     truncated: bool = False
     # Что не так с аргументами — для `invalid`.
@@ -77,8 +91,12 @@ class _Invalid(Exception):
 
 
 def query_rows(connection: Connection, grants: Grants, query: KpiQuery) -> KpiResult:
-    """Строки таблицы в пределах полномочий пользователя."""
-    table = TABLES.get(query.table)
+    """Строки таблицы в пределах полномочий пользователя.
+
+    `denied` не несёт содержимого: ни строк, ни перечня отказанного — как и при отказе
+    во всех названных участках.
+    """
+    table = TABLES.get(query.table) if isinstance(query.table, str) else None
     if table is None:
         return KpiResult(Status.INVALID, problem=f"table: нет таблицы {query.table!r}")
     granted = grants.kpi_sites(query.table)
@@ -101,15 +119,16 @@ def query_rows(connection: Connection, grants: Grants, query: KpiQuery) -> KpiRe
             return KpiResult(Status.DENIED if denied_sites else Status.EMPTY)
 
     denied_equipment: tuple[str, ...] = ()
+    missing_equipment: tuple[str, ...] = ()
     if named_equipment is not None:
-        own, foreign, unknown = _split_equipment(connection, named_equipment, granted)
-        denied_equipment = tuple(sorted(foreign))
-        if not own:
-            if foreign:
-                return KpiResult(Status.DENIED, denied_sites=denied_sites)
-            if unknown:
-                return KpiResult(Status.NOT_FOUND)
-        conditions.append(table.c[EQUIPMENT_ID].in_(sorted(own)))
+        sites = equipment_sites(connection, named_equipment)
+        own = sorted(item for item, site in sites.items() if site in granted)
+        foreign = sorted(item for item, site in sites.items() if site and site not in granted)
+        unknown = sorted(item for item, site in sites.items() if site is None)
+        if named_equipment and not own:
+            return KpiResult(Status.DENIED if foreign else Status.NOT_FOUND)
+        denied_equipment, missing_equipment = tuple(foreign), tuple(unknown)
+        conditions.append(table.c[EQUIPMENT_ID].in_(own))
 
     site: Column[str] = table.c[SITE]
     statement = (
@@ -125,6 +144,7 @@ def query_rows(connection: Connection, grants: Grants, query: KpiQuery) -> KpiRe
         sites=tuple(sorted(scope)),
         denied_sites=denied_sites,
         denied_equipment=denied_equipment,
+        missing_equipment=missing_equipment,
         truncated=len(rows) > limit,
     )
 
@@ -147,6 +167,10 @@ def _conditions(
     sites: frozenset[str] | None = None
     equipment: frozenset[str] | None = None
     for item in query.filters:
+        if not isinstance(item, Filter) or not isinstance(item.column, str):
+            raise _Invalid("filters: ожидался список фильтров с именем колонки")
+        if not isinstance(item.op, str):
+            raise _Invalid(f"filters: операция для {item.column} — строка")
         if item.column in _HIDDEN or item.column not in table.c:
             raise _Invalid(f"filters: нет колонки {item.column!r} в таблице {query.table}")
         column = table.c[item.column]
@@ -155,7 +179,8 @@ def _conditions(
             if item.column == SITE:
                 sites = values if sites is None else sites & values
             elif item.column == EQUIPMENT_ID:
-                equipment = values if equipment is None else equipment & values
+                ids = frozenset(normalize(value) for value in values)
+                equipment = ids if equipment is None else equipment & ids
             else:
                 conditions.append(column.in_(sorted(values)))
         elif item.op in _COMPARISONS:
@@ -188,9 +213,17 @@ def _parse(column: Column[Any], value: Any) -> Any:
         if isinstance(kind, Integer):
             if isinstance(value, bool):
                 raise TypeError
-            return int(value) if isinstance(value, int) else int(str(value).strip())
+            number = value if isinstance(value, int) else int(str(value).strip())
+            bound = next(limit for cls, limit in _INT_BOUNDS if isinstance(kind, cls))
+            if not -bound <= number < bound:
+                raise ValueError
+            return number
         if isinstance(kind, DateTime):
-            return datetime.fromisoformat(str(value).strip())
+            moment = datetime.fromisoformat(str(value).strip())
+            # Время набора — местное, без пояса; значение с поясом база сдвинула бы молча.
+            if moment.tzinfo is not None:
+                raise ValueError
+            return moment
         if isinstance(kind, Date):
             return date.fromisoformat(str(value).strip())
     except TypeError, ValueError:
@@ -198,24 +231,3 @@ def _parse(column: Column[Any], value: Any) -> Any:
     if not isinstance(value, str):
         raise _Invalid(f"filters: для {column.name} ожидалась строка")
     return value
-
-
-def _split_equipment(
-    connection: Connection, named: frozenset[str], granted: frozenset[str]
-) -> tuple[set[str], set[str], set[str]]:
-    """Оборудование из фильтра: своего участка, чужого и неизвестное.
-
-    Участок берётся из базы, а не из слов модели; функция возвращает только код участка.
-    """
-    own: set[str] = set()
-    foreign: set[str] = set()
-    unknown: set[str] = set()
-    for equipment_id in named:
-        site = connection.scalar(_EQUIPMENT_SITE, {"equipment_id": equipment_id})
-        if site is None:
-            unknown.add(equipment_id)
-        elif site in granted:
-            own.add(equipment_id)
-        else:
-            foreign.add(equipment_id)
-    return own, foreign, unknown

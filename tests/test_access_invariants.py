@@ -50,9 +50,12 @@ def test_every_user_against_every_closed_document_site_and_equipment(
     docs = {doc.doc_id: doc for doc in world.docs.values()}
     acl = {doc_id: set(doc.acl) for doc_id, doc in docs.items()}
     tables = {table: _rows(root, table) for table in KPI}
-    equipment = {row["equipment_id"]: row["site"] for row in tables["equipment"]}
+    # Повторный идентификатор — по первой строке файла, как функция базы.
+    equipment: dict[str, str] = {}
+    for row in tables["equipment"]:
+        equipment.setdefault(row["equipment_id"], row["site"])
     sites = {row["site"] for rows in tables.values() for row in rows}
-    checked = {"документы": 0, "участки": 0, "оборудование": 0}
+    checked = {"документы": 0, "участки": 0, "оборудование": 0, "части разделов": 0}
 
     for user in _users(root):
         groups = {EVERYONE, *(user["groups"] or [])}
@@ -67,6 +70,17 @@ def test_every_user_against_every_closed_document_site_and_equipment(
                 title = docs[doc_id].title
                 found = search(connection, grants, title, include_superseded=True)
                 assert doc_id not in {chunk.doc_id for chunk in found.chunks}, (user, doc_id)
+
+            # Ссылка на раздел длинного документа отдаёт все его части.
+            for doc_id in sorted(set(acl) - set(closed)):
+                whole = get_document(connection, grants, doc_id)
+                assert whole.status is Status.OK, (user["user_id"], doc_id)
+                for chunk in whole.chunks:
+                    if "." in chunk.chunk_id.split("#", 1)[1]:
+                        checked["части разделов"] += 1
+                        section = chunk.chunk_id.rsplit(".", 1)[0]
+                        parts = get_document(connection, grants, section).chunks
+                        assert chunk in parts and len(parts) > 1, chunk.chunk_id
 
             for table in KPI:
                 allowed = set(user["kpi"].get(table) or [])
