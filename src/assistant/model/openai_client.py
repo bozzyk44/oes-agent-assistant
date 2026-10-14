@@ -54,6 +54,8 @@ class OpenAICompatibleClient:
                 arguments["tool_choice"] = request.tool_choice
         if request.response_format is not None:
             arguments["response_format"] = request.response_format
+        if request.timeout is not None:
+            arguments["timeout"] = request.timeout
         if self._extra_body:
             arguments["extra_body"] = self._extra_body
         try:

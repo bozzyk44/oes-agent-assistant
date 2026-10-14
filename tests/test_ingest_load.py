@@ -176,7 +176,7 @@ def test_index_is_stemmed_and_folds_yo(database: Database, small: Path) -> None:
         ).one()
     # Идентификатор с дефисом и числом хранится целиком, без стемминга.
     assert "ex-1" in terms
-    assert row == ("superseded", None, "R2", ["engineering", "site-k1"])
+    assert row == ("superseded", None, "R2", ["engineering", "site-k1", "hr"])
 
 
 def test_loader_end_to_end_is_idempotent(database: Database, tmp_path: Path) -> None:

@@ -306,6 +306,23 @@ def test_truncated_reply_is_not_a_final_answer(database: Database, small: Path) 
     assert "Через 7" not in str(reply.body["answer"])
 
 
+def test_call_timeout_is_bounded_by_the_turn_deadline(database: Database, small: Path) -> None:
+    holder: list[Service] = []
+
+    def slow(request: Any) -> ModelReply:
+        holder[0].clock.advance(80)
+        return tools(call(SEARCH, query="a"))
+
+    model = ScriptedModel([slow, final("ответ")])
+    service, _ = _service(database, model)
+    holder.append(service)
+    service.turn("u-eng", new_session(), "Вопрос")
+    first, second = (request.timeout for request in model.requests)
+    # Предел хода — 90 с: после 80 с на второй вызов остаётся не больше 10.
+    assert first is not None and second is not None
+    assert second <= 10 < first
+
+
 def test_transient_error_is_retried_once_and_counted(database: Database, small: Path) -> None:
     model = ScriptedModel([TransientModelError("503"), final("ответ")])
     service, _ = _service(database, model)

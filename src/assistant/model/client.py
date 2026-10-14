@@ -45,6 +45,9 @@ class ChatRequest:
     tool_choice: Literal["auto", "none"] | None = "auto"
     # Требование к формату ответа; не входит в неизменную часть и в `prefix_hash`.
     response_format: dict[str, Any] | None = None
+    # Предел времени этого вызова, секунды: не больше остатка срока хода. `None` — предел
+    # клиента из настроек.
+    timeout: float | None = None
 
 
 class ModelError(Exception):

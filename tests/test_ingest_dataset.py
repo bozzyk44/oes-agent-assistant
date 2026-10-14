@@ -238,7 +238,7 @@ def test_template_built_frontmatter_is_read(tmp_path: Path) -> None:
     _replace("docs/A1.md", "title: Памятка для всех", "title: Приказ № 12: об ответственных")(root)
     _replace("docs/H1.md", "title: Положение об окладах", "title: Положение #7 об окладах")(root)
     _replace("docs/H1.md", "acl: [hr]", "acl: hr, finance")(root)
-    _replace("docs/R1.md", "acl: [engineering, site-k1]", "acl: []")(root)
+    _replace("docs/R1.md", "acl: [engineering, site-k1, hr]", "acl: []")(root)
     _replace("docs/R2.md", "title: Регламент ремонта", 'title: "Регламент: ремонт"')(root)
     docs = {doc.doc_id: doc for doc in read_dataset(root, 1).documents}
     # Двоеточие в названии — для YAML ошибка; решётка — комментарий, обрезающий название.
@@ -303,7 +303,7 @@ def test_frontmatter_values_are_text_not_guessed_types(tmp_path: Path) -> None:
     root = write_small_dataset(tmp_path)
     (root / "docs" / "R1.md").rename(root / "docs" / "0012.md")
     _replace("docs/0012.md", "id: R1", "id: 0012")(root)
-    _replace("docs/0012.md", "acl: [engineering, site-k1]", "acl: [no, 7, site-k1]")(root)
+    _replace("docs/0012.md", "acl: [engineering, site-k1, hr]", "acl: [no, 7, site-k1]")(root)
     _replace("docs/R2.md", "supersedes: R1", "supersedes: 0012")(root)
     _replace("docs/A1.md", "status: active", "status: yes")(root)
     _replace("docs/H1.md", "---\n\n#", "superseded_by: ~\n---\n\n#")(root)

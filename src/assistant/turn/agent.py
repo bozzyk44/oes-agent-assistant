@@ -88,7 +88,9 @@ class AgentHandler:
         self._model = model
         self._prefix = prefix
         self._format_mode = settings.response_format
-        # Сервер отверг параметр формата — принуждение выключено до перезапуска процесса.
+        self._timeout = settings.timeout_seconds
+        # Сервер отверг строгие параметры, а повтор без них прошёл — они выключены до
+        # перезапуска процесса.
         self._format_disabled = False
         self.prefix_hash = prefix.hash
 
@@ -117,7 +119,7 @@ class AgentHandler:
             if context.deadline.expired():
                 raise TimeoutError("предел времени хода")
             last = sent == MAX_CALLS - 1
-            request = self._request(state.messages, last)
+            request = self._request(state.messages, last, context.deadline.remaining())
             try:
                 reply = self._complete(request, state)
             except TransientModelError as error:
@@ -161,7 +163,7 @@ class AgentHandler:
             return self._finish(context, state, None if reply.truncated else reply, at_limit=last)
         return self._finish(context, state, None, at_limit=True)
 
-    def _request(self, messages: list[dict[str, Any]], last: bool) -> ChatRequest:
+    def _request(self, messages: list[dict[str, Any]], last: bool, remaining: float) -> ChatRequest:
         strict = not self._format_disabled
         enforce = strict and (self._format_mode == "all" or (self._format_mode == "last" and last))
         return ChatRequest(
@@ -169,6 +171,8 @@ class AgentHandler:
             tools=self._prefix.tools,
             tool_choice=("none" if strict else None) if last else "auto",
             response_format=ANSWER_SCHEMA if enforce else None,
+            # Вызов не переживает срок хода: иначе ход пережил бы и отметку занятости сессии.
+            timeout=min(self._timeout, remaining),
         )
 
     def _complete(self, request: ChatRequest, state: _State) -> ModelReply:
@@ -178,7 +182,7 @@ class AgentHandler:
             # Повтор без строгих параметров. Выключаются они, только если повтор прошёл:
             # иначе отказ был по другой причине — длина входа, шаблон чата.
             state.record["format_rejected"] = True
-            plain = ChatRequest(request.messages, request.tools, None, None)
+            plain = ChatRequest(request.messages, request.tools, None, None, request.timeout)
             reply = self._model.complete(plain)
             if not self._format_disabled:
                 log.warning("сервер модели отверг строгие параметры; принуждение выключено")
