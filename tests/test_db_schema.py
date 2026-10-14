@@ -75,6 +75,20 @@ def test_lexeme_is_quoted_for_tsquery(database: Database, lexeme: str) -> None:
         connection.execute(text("select kb.lexeme('x')"))
 
 
+def test_equipment_key_is_callable_by_no_application_role(database: Database) -> None:
+    # Ключ считается только внутри функций в обход политик, с правами владельца.
+    with database.owner.connect() as connection:
+        row = connection.execute(
+            text(
+                "select has_function_privilege('test_app', :f, 'execute'),"
+                " has_function_privilege('test_toir', :f, 'execute'),"
+                " has_function_privilege('public', :f, 'execute')"
+            ),
+            {"f": "dwh.equipment_key(text)"},
+        ).one()
+    assert tuple(row) == (False, False, False)
+
+
 def test_bypass_functions_are_callable_only_by_service_role(database: Database) -> None:
     functions = (
         "kb.document_exists(text)",

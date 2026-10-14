@@ -220,7 +220,7 @@ def test_toir_unavailable_keeps_confirming_and_retry_succeeds(
     assert again.status_code == 200
     assert len(toir.requests(key)) == 1
     # Каждый вызов ТОиР — с одним и тем же ключом из строки действия.
-    assert set(toir.sent) <= {key}
+    assert set(toir.sent) == {key}
     assert _state(database, action_id)[0] == "done"
 
 
@@ -268,7 +268,8 @@ def test_grant_revoked_after_intent_retry_completes(
 ) -> None:
     service = _service(database, toir)
     action_id = _propose(service)
-    toir.fault = _failing(503)
+    # Заявка создана, ответ потерян: ради этого случая повтор доводит намерение.
+    toir.fault = _lost_reply
     assert _confirm(service, action_id).status_code == 502
     toir.fault = None
     with database.owner.begin() as connection:
@@ -381,9 +382,12 @@ def test_confirm_responses_and_log_carry_no_secret(
     action_id = _propose(service)
     toir.fault = _failing(503)
     texts = [_confirm(service, action_id).text]
+    toir.fault = _unreachable
+    texts.append(_confirm(service, action_id).text)
     toir.fault = None
     texts += [_confirm(service, action_id).text, _reject(service, action_id).text]
     assert all(TOIR_TOKEN not in body for body in texts)
     # Отказ ТОиР попал в журнал — без токена.
     assert "ТОиР ответил 503" in caplog.text
+    assert "ТОиР недоступен: ConnectionRefusedError" in caplog.text
     assert TOIR_TOKEN not in caplog.text

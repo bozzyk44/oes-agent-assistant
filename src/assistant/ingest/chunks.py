@@ -9,6 +9,8 @@
 import re
 from dataclasses import dataclass
 
+from assistant.lookalikes import fold_lower
+
 # Лимит результата инструмента из задания и потолок фрагмента — его четверть:
 # в одну выдачу поиска помещается до четырёх фрагментов целиком.
 TOOL_RESULT_TOKENS = 1500
@@ -72,10 +74,12 @@ def exact_terms(text: str) -> list[str]:
     """Идентификаторы и числа для точного поиска: слова с цифрой, без стемминга.
 
     Регистр и «ё» приводятся так же, как в полнотекстовом индексе; запятая в десятичном
-    числе — к точке.
+    числе — к точке; похожие кириллические буквы — к латинским: «ХУ-7», набранный
+    кириллицей, находит «XY-7». Пробелы и тире внутри идентификатора, как в ключе
+    оборудования, поиск не убирает: «XY 7» — это два термина.
     """
     found = {
-        match.group().lower().replace("ё", "е").replace(",", ".")
+        fold_lower(match.group().lower().replace("ё", "е")).replace(",", ".")
         for match in _TERM.finditer(text)
         if any(char.isdigit() for char in match.group())
     }

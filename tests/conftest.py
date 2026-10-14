@@ -1,3 +1,4 @@
+import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -37,6 +38,34 @@ def dataset(
 OWNER_PASSWORD = "test-owner-password-marker-91ab"
 SERVICE_PASSWORD = "test-service-password-marker-3e7d"
 TOIR_PASSWORD = "test-toir-password-marker-c240"
+
+
+@pytest.fixture(autouse=True)
+def secrets_stay_out_of_log(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
+    """Общая проверка для каждого теста: ни одна метка секрета не попала в журнал.
+
+    Ответы API и входы модели проверяются там, где они есть; журнал — здесь, чтобы новый
+    тест получал проверку без усилий автора.
+    """
+    from tests.servicekit import MODEL_KEY, TOIR_TOKEN
+
+    # Свои модули — с подробным уровнем; сторонние, вроде SQLAlchemy, — как обычно, иначе
+    # каждый запрос с параметрами форматировался бы в журнал всех тестов.
+    for name in ("assistant", "toir_stub"):
+        caplog.set_level(logging.DEBUG, logger=name)
+    yield
+    # `caplog.text` после `yield` — только записи фазы завершения: перед каждой фазой
+    # pytest заводит журнал заново. Записи теста берутся по фазам явно.
+    records = [record for when in ("setup", "call") for record in caplog.get_records(when)]
+    markers = (TOIR_TOKEN, MODEL_KEY, OWNER_PASSWORD, SERVICE_PASSWORD, TOIR_PASSWORD)
+    assert leaked_markers(records, markers) == [], "метка секрета в журнале"
+
+
+def leaked_markers(records: list[logging.LogRecord], markers: tuple[str, ...]) -> list[str]:
+    """Метки, встретившиеся в записях журнала — в тексте и в трассировке исключения."""
+    formatter = logging.Formatter()
+    text = "\n".join(formatter.format(record) for record in records)
+    return [marker for marker in markers if marker in text]
 
 
 @dataclass(frozen=True)

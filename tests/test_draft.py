@@ -88,12 +88,19 @@ def test_empty_identifier_is_never_mentioned() -> None:
         "Дробилка-1",
         "дробилка_ё/2",
         "a\tb\nc",
+        "EX\u00a01",
+        "EX\u20141",
+        "EX\u2212\u202f1",
     ],
 )
 def test_python_key_matches_database_key(database: Database, value: str) -> None:
     with database.owner.connect() as connection:
         in_database = connection.scalar(text("select dwh.equipment_key(:v)"), {"v": value})
     assert equipment_key(value) == in_database
+
+
+def test_key_ignores_nonbreaking_spaces_and_dashes() -> None:
+    assert equipment_key("EX\u00a0\u20141") == equipment_key("EX-1") == "EX1"
 
 
 def test_key_ignores_case_of_any_cyrillic_letter() -> None:

@@ -11,10 +11,11 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import Engine, create_engine, text
 
 from tests.conftest import Database
-from toir_stub.app import ConfigError, build_app, create_app
+from toir_stub.app import ConfigError, RepairRequest, build_app, create_app
 
 pytestmark = pytest.mark.db
 
@@ -154,6 +155,22 @@ def test_lone_surrogate_is_422_not_500(client: TestClient) -> None:
     raw = b'{"equipment_id": "XY-7", "description": "\\ud800", "priority": 1}'
     reply = client.post("/requests", content=raw, headers={**AUTH, "Idempotency-Key": _key()})
     assert reply.status_code == 422
+
+
+def test_model_rejects_lone_surrogate_without_json() -> None:
+    # Одиночный суррогат pydantic отвергает сам, и вне разбора JSON тоже; нулевой символ
+    # ловит валидатор схемы.
+    with pytest.raises(ValidationError):
+        RepairRequest.model_validate({**BODY, "description": "\ud800"})
+    with pytest.raises(ValidationError, match="нулевой символ"):
+        RepairRequest.model_validate({**BODY, "description": "a\x00b"})
+
+
+@pytest.mark.parametrize("key", ["a\x00b", "", "x" * 201])
+def test_list_checks_key_like_create(client: TestClient, key: str) -> None:
+    reply = client.get("/requests", headers=AUTH, params={"idempotency_key": key})
+    assert reply.status_code == 400
+    assert _post(client, key).status_code == 400
 
 
 def test_invalid_json_with_token_is_422(client: TestClient) -> None:

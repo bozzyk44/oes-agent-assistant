@@ -13,7 +13,7 @@ from assistant.ingest.chunks import exact_terms, split_document
 from assistant.ingest.dataset import Dataset
 
 # Версия алгоритма загрузки: растёт при смене правил разбиения на фрагменты и индексации.
-LOADER_VERSION = 1
+LOADER_VERSION = 2
 
 
 def load_dataset(connection: Connection, dataset: Dataset) -> bool:
