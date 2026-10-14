@@ -158,17 +158,19 @@ def test_lone_surrogate_is_422_not_500(client: TestClient) -> None:
 
 
 def test_model_rejects_lone_surrogate_without_json() -> None:
-    # Одиночный суррогат отвергается и вне разбора JSON: строку такого вида pydantic
-    # не принимает сам, а нулевой символ ловит валидатор схемы.
+    # Одиночный суррогат pydantic отвергает сам, и вне разбора JSON тоже; нулевой символ
+    # ловит валидатор схемы.
     with pytest.raises(ValidationError):
         RepairRequest.model_validate({**BODY, "description": "\ud800"})
     with pytest.raises(ValidationError, match="нулевой символ"):
         RepairRequest.model_validate({**BODY, "description": "a\x00b"})
 
 
-def test_list_with_null_in_key_is_422(client: TestClient) -> None:
-    reply = client.get("/requests", headers=AUTH, params={"idempotency_key": "a\x00b"})
-    assert reply.status_code == 422
+@pytest.mark.parametrize("key", ["a\x00b", "", "x" * 201])
+def test_list_checks_key_like_create(client: TestClient, key: str) -> None:
+    reply = client.get("/requests", headers=AUTH, params={"idempotency_key": key})
+    assert reply.status_code == 400
+    assert _post(client, key).status_code == 400
 
 
 def test_invalid_json_with_token_is_422(client: TestClient) -> None:

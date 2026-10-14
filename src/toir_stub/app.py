@@ -78,9 +78,9 @@ class RepairRequest(BaseModel):
     @classmethod
     def storable(cls, value: str) -> str:
         # Текст, который база не сохранит, — неверный запрос, а не ошибка сервера: иначе
-        # сервис повторял бы его без конца.
-        if "\x00" in value or any(0xD800 <= ord(char) <= 0xDFFF for char in value):
-            raise ValueError("нулевой символ или одиночный суррогат")
+        # сервис повторял бы его без конца. Одиночный суррогат pydantic отвергает сам.
+        if "\x00" in value:
+            raise ValueError("нулевой символ")
         return value
 
 
@@ -117,6 +117,16 @@ def ensure_schema(engine: Engine) -> None:
     with engine.begin() as connection:
         connection.execute(text("select pg_advisory_xact_lock(:key)"), {"key": _SCHEMA_LOCK})
         connection.exec_driver_sql(_SCHEMA)
+
+
+def _check_key(key: str | None) -> str:
+    """Ключ идемпотентности: непустой, до `MAX_KEY_LENGTH` символов, без нулевого символа."""
+    if not key or len(key) > MAX_KEY_LENGTH or "\x00" in key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ключ идемпотентности: непустой, до {MAX_KEY_LENGTH} символов",
+        )
+    return key
 
 
 def _body_hash(body: RepairRequest) -> str:
@@ -169,17 +179,13 @@ def build_app(engine: Engine, token: str) -> FastAPI:
     ) -> JSONResponse:
         # Порядок проверок: токен (зависимость выше), ключ, тело. Тело разбирается здесь,
         # а не фреймворком: иначе неразборчивый JSON без токена получал бы 422, а не 401.
-        if not idempotency_key or len(idempotency_key) > MAX_KEY_LENGTH:
-            raise HTTPException(
-                status_code=400,
-                detail=f"нужен заголовок Idempotency-Key длиной до {MAX_KEY_LENGTH} символов",
-            )
+        key = _check_key(idempotency_key)
         try:
             body = RepairRequest.model_validate_json(await request.body())
         except ValidationError as error:
             details = jsonable_encoder(error.errors(include_input=False, include_url=False))
             return JSONResponse(status_code=422, content={"detail": details})
-        return await run_in_threadpool(_create, idempotency_key, body)
+        return await run_in_threadpool(_create, key, body)
 
     def _create(idempotency_key: str, body: RepairRequest) -> JSONResponse:
         values = {"key": idempotency_key, "body_hash": _body_hash(body), **body.model_dump()}
@@ -200,8 +206,8 @@ def build_app(engine: Engine, token: str) -> FastAPI:
     @app.get("/requests", dependencies=guarded)
     def list_requests(idempotency_key: str | None = None) -> list[StoredRequest]:
         """Все заявки по порядку создания; с `idempotency_key` — только заявка с этим ключом."""
-        if idempotency_key is not None and "\x00" in idempotency_key:
-            raise HTTPException(status_code=422, detail="нулевой символ в ключе")
+        if idempotency_key is not None:
+            _check_key(idempotency_key)
         with engine.connect() as connection:
             return [_stored(row) for row in connection.execute(_ALL, {"key": idempotency_key})]
 

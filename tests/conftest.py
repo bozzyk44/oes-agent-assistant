@@ -49,7 +49,10 @@ def secrets_stay_out_of_log(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
     """
     from tests.servicekit import MODEL_KEY, TOIR_TOKEN
 
-    caplog.set_level(logging.DEBUG)
+    # Свои модули — с подробным уровнем; сторонние, вроде SQLAlchemy, — как обычно, иначе
+    # каждый запрос с параметрами форматировался бы в журнал всех тестов.
+    for name in ("assistant", "toir_stub"):
+        caplog.set_level(logging.DEBUG, logger=name)
     yield
     leaked = [
         marker
