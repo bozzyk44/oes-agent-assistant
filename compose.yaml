@@ -155,6 +155,7 @@ services:
       PRICE_INPUT: ${PRICE_INPUT:-}
       PRICE_CACHED: ${PRICE_CACHED:-}
       PRICE_OUTPUT: ${PRICE_OUTPUT:-}
+      EVAL_ATTEMPTS: ${EVAL_ATTEMPTS:-}
       DATA_DIR: /data
       QUESTIONS: /questions/${QUESTIONS_FILE:-questions.jsonl}
       EVAL_DIR: /app/eval

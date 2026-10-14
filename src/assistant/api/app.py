@@ -6,6 +6,7 @@ import secrets
 import time
 from datetime import UTC, datetime
 from typing import Annotated
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -64,6 +65,15 @@ _READY = text(
     "select (select version_num from public.alembic_version),"
     " (select count(*) from app.dataset_version)"
 )
+
+
+def _public_url(url: str) -> str:
+    """Адрес провайдера без учётных данных в адресе и без параметров запроса."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
 
 
 def default_runtime(settings: Settings, engine: Engine, handler: TurnHandler) -> Runtime:
@@ -226,6 +236,7 @@ def build_app(
                 "dataset_hash": dataset,
                 "prefix_hash": runtime.handler.prefix_hash,
                 "model": model.name,
+                "model_base_url": _public_url(model.base_url),
                 "sampling": {
                     "temperature": 0,
                     "max_output_tokens": model.max_output_tokens,
