@@ -7,7 +7,8 @@
 import csv
 import json
 import shutil
-from datetime import datetime, timedelta
+from dataclasses import replace
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ from datagen.check import check_dataset, check_traps
 from datagen.questions import CASES, Question, accessible_text, build_questions
 from datagen.render import render
 from datagen.text import normalize
-from datagen.world import World
+from datagen.world import DEFAULT_SEED, HOLDOUT_SEED, SECOND_SEED, World, build_world
 
 Dataset = tuple[Path, World]
 
@@ -47,7 +48,22 @@ def _by_case(world: World, case: str) -> list[Question]:
 
 def _tenths(minutes: int) -> str:
     hours = Decimal(minutes) / 60
-    return str(hours.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)).removesuffix(".0")
+    return str(hours.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
+def _within(row: dict[str, str], basis: dict[str, Any]) -> bool:
+    start: date = basis["date_from"]
+    end: date = basis["date_to"]
+    return start.isoformat() <= row["date"] <= end.isoformat()
+
+
+def _tonnes(production: list[dict[str, str]], basis: dict[str, Any]) -> list[int]:
+    """Сменная добыча участка за период вопроса: весь период или неделя из него."""
+    return [
+        int(row["tonnes"])
+        for row in production
+        if row["site"] == basis["site"] and _within(row, basis)
+    ]
 
 
 def _downtime_minutes(root: Path, site: str, reason: str) -> int:
@@ -74,17 +90,16 @@ def test_kpi_expectations_are_recomputed_from_files(dataset: Dataset) -> None:
     assert _expected(root, lowest.qid)["must_include"] == [str(min(tonnes))]
     # Минимум — смена с провалом добычи, автор — начальник этого участка.
     assert min(tonnes) * 2 < sorted(tonnes)[len(tonnes) // 2]
-    tonnes = [int(row["tonnes"]) for row in production if row["site"] == mean.basis["site"]]
+    tonnes = _tonnes(production, mean.basis)
     average = (Decimal(sum(tonnes)) / len(tonnes)).quantize(Decimal("0.1"), ROUND_HALF_UP)
-    assert _expected(root, mean.qid)["must_include"] == [str(average).removesuffix(".0")]
+    assert _expected(root, mean.qid)["must_include"] == [str(average)]
 
     (plan,) = _by_case(world, "kpi_and_doc")
-    site = plan.basis["site"]
-    produced = sum(int(row["tonnes"]) for row in production if row["site"] == site)
-    days = len({row["date"] for row in production})
-    planned = world.shift_plan[site] * 2 * days
+    produced = sum(_tonnes(production, plan.basis))
+    days = len({row["date"] for row in production if _within(row, plan.basis)})
+    planned = world.shift_plan[plan.basis["site"]] * 2 * days
     percent = (Decimal(produced) * 100 / planned).quantize(Decimal("0.1"), ROUND_HALF_UP)
-    assert _expected(root, plan.qid)["must_include"] == [str(percent).removesuffix(".0")]
+    assert _expected(root, plan.qid)["must_include"] == [str(percent)]
 
     (similar,) = _by_case(world, "kpi_not_similar_doc")
     minutes = _downtime_minutes(root, similar.basis["site"], similar.basis["reason"])
@@ -249,7 +264,6 @@ def test_questions_do_not_shift_the_dataset(dataset: Dataset) -> None:
 @pytest.mark.parametrize("seed", range(40))
 def test_any_seed_gives_a_valid_question_set(seed: int, tmp_path: Path) -> None:
     from datagen.render import write_dataset
-    from datagen.world import build_world
 
     world = build_world(seed)
     write_dataset(world, tmp_path)
@@ -280,9 +294,55 @@ def test_short_expectations_are_not_bare_digits(dataset: Dataset) -> None:
             assert not (value.isdigit() and len(value) <= 2), (record["id"], value)
 
 
-def test_holdout_seed_is_neither_data_nor_test_seed() -> None:
-    from datagen.world import DEFAULT_SEED, HOLDOUT_SEED, SECOND_SEED
+@pytest.mark.parametrize("seed", [DEFAULT_SEED, SECOND_SEED, HOLDOUT_SEED])
+def test_tenths_expectations_are_not_a_prefix_of_a_wrong_answer(seed: int) -> None:
+    # «96» подстрокой есть в неверном «96.4 %»: вопросы до десятых ждут «96.4», а не «96».
+    world = build_world(seed)
+    tenths = [question for question in _questions(world).values() if question.tenths]
+    assert {question.case for question in tenths} == {
+        "kpi_calc",
+        "kpi_and_doc",
+        "kpi_not_similar_doc",
+    }
+    for question in tenths:
+        (value,) = question.must_include
+        whole, _, fraction = value.partition(".")
+        assert whole.isdigit() and len(fraction) == 1 and fraction != "0", (question.qid, value)
 
+
+def test_tenths_check_catches_a_whole_number(
+    dataset: Dataset, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, world = dataset
+    built = build_questions(world, render(world))
+    spoiled = tuple(
+        replace(question, must_include=(question.must_include[0].split(".")[0],))
+        if question.tenths
+        else question
+        for question in built
+    )
+    monkeypatch.setattr("datagen.check.build_questions", lambda *_: spoiled)
+    problems = check_traps(root, world)
+    for question in spoiled:
+        if question.tenths:
+            assert any(question.qid in p and "десятыми" in p for p in problems), question.qid
+
+
+def test_tenths_check_catches_a_question_without_the_mark(
+    dataset: Dataset, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Новый вопрос «до десятых», которому забыли пометку, иначе прошёл бы мимо проверки.
+    root, world = dataset
+    built = build_questions(world, render(world))
+    spoiled = tuple(replace(question, tenths=False) for question in built)
+    monkeypatch.setattr("datagen.check.build_questions", lambda *_: spoiled)
+    problems = check_traps(root, world)
+    for question in built:
+        if question.tenths:
+            assert any(question.qid in p and "без пометки" in p for p in problems), question.qid
+
+
+def test_holdout_seed_is_neither_data_nor_test_seed() -> None:
     assert HOLDOUT_SEED not in (DEFAULT_SEED, SECOND_SEED)
 
 
