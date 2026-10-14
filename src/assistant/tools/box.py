@@ -33,7 +33,7 @@ from assistant.access import (
 )
 from assistant.actions.draft import prepare_repair
 from assistant.ingest.chunks import TOOL_RESULT_TOKENS
-from assistant.tools.arith import NUMBER, BadExpression, evaluate, normalize_digits
+from assistant.tools.arith import BadExpression, evaluate, literals, normalize_digits
 from assistant.tools.kpi import _number, round_half_up, run_kpi
 from assistant.tools.schemas import (
     ARGUMENTS,
@@ -109,7 +109,9 @@ class ToolBox:
     # Оценка токенов куска входа — та же, что у проверки бюджета хода.
     count: Count
     limit: int = TOOL_RESULT_TOKENS
-    # Результаты `ok` этого хода в том виде, в каком их увидела модель: опора входов расчёта.
+    # Результаты `ok` этого хода в том виде, в каком их получила модель, — опора входов
+    # расчёта. Результат, позже убранный из входа ради бюджета, остаётся опорой: число в нём
+    # настоящее.
     sources: list[str] = field(default_factory=list)
 
     def run(self, name: str, raw_arguments: str) -> ToolResult:
@@ -299,9 +301,13 @@ def _unsourced(args: CalculateArgs, sources: str) -> list[str]:
     пользователя. Сравнение — подстрокой после той же нормализации, что у прогона: «2852.5»
     опирается на «2 852,50» документа. Результат прежнего расчёта — тоже опора: его входы
     уже проверены.
+
+    Граница числа не проверяется: «1143» опирается на «114300». Строгое сравнение отвергло
+    бы законные выводные числа — дни периода из дат вопроса, — а защита ловит число,
+    которого нет нигде, как в провале расчёта по выдуманному факту.
     """
     if args.operation == "expression":
-        values = [Decimal(item) for item in NUMBER.findall(normalize_digits(args.expression or ""))]
+        values = literals(args.expression or "")
     else:
         values = list(args.numbers)
     inputs = dict.fromkeys(_plain(value) for value in values)

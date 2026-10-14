@@ -583,6 +583,22 @@ def test_calculate_refuses_a_number_without_source(database: Database, small: Pa
     assert record["calls"][1]["tool_calls"][0]["unsourced"] == ["114300"]
 
 
+@pytest.mark.parametrize("expression", ["1e5 / 630 * 100", "114_300 / 630 * 100"])
+def test_calculate_reads_expression_numbers_as_evaluated(
+    database: Database, small: Path, expression: str
+) -> None:
+    # Запись числа, которую разбор читает одним числом, не дробится на группы цифр.
+    result = _tool(
+        database,
+        "u-eng",
+        CALCULATE,
+        "Числа: 1; 5; 114; 300; 630",
+        operation="expression",
+        expression=expression,
+    )
+    assert result["status"] == "invalid"
+
+
 def test_calculate_constant_100_needs_no_source(database: Database, small: Path) -> None:
     result = _tool(
         database,

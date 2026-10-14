@@ -34,6 +34,22 @@ class BadExpression(ValueError):
 
 def evaluate(text: str) -> Decimal:
     """Значение выражения. Деление на ноль — `ZeroDivisionError` или `decimal`-исключение."""
+    return _value(_parse(text), 0)
+
+
+def literals(text: str) -> list[Decimal]:
+    """Числа выражения — те же, что идут в расчёт: `1e5` и `114_300` — одно число каждое,
+    а не несколько групп цифр."""
+    return [
+        _constant(node)
+        for node in ast.walk(_parse(text))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, int | float)
+        and not isinstance(node.value, bool)
+    ]
+
+
+def _parse(text: str) -> ast.expr:
     if not text.strip() or len(text) > MAX_LENGTH:
         raise BadExpression(f"ожидалось непустое выражение до {MAX_LENGTH} символов")
     # Модели пишут знаки по-разному. Пробел между цифрами — разряды, запятая — десятичная:
@@ -43,7 +59,12 @@ def evaluate(text: str) -> Decimal:
         tree = ast.parse(prepared.strip(), mode="eval")
     except SyntaxError:
         raise BadExpression("выражение не разобрано: только числа, + - * / и скобки") from None
-    return _value(tree.body, 0)
+    return tree.body
+
+
+def _constant(node: ast.Constant) -> Decimal:
+    value = node.value
+    return Decimal(value) if isinstance(value, int) else Decimal(ast.unparse(node))
 
 
 def normalize_digits(text: str) -> str:
@@ -58,8 +79,8 @@ def _value(node: ast.AST, depth: int) -> Decimal:
     match node:
         case ast.Constant(value=bool()):
             raise BadExpression("в выражении — не число")
-        case ast.Constant(value=int() | float() as value):
-            return Decimal(ast.unparse(node)) if isinstance(value, float) else Decimal(value)
+        case ast.Constant(value=int() | float()):
+            return _constant(node)
         case ast.UnaryOp(op=ast.USub(), operand=operand):
             return -_value(operand, depth + 1)
         case ast.UnaryOp(op=ast.UAdd(), operand=operand):
