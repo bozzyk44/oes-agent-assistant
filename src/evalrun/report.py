@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from evalrun.diagnostics import fragment_in_input
+from evalrun.diagnostics import diagnose, fragment_in_input
 
 STABLE = "проходит стабильно"
 UNSTABLE = "нестабилен"
@@ -31,8 +31,20 @@ def read(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if item.get("type") == "config":
             config = item
         elif item.get("type") == "attempt":
-            attempts.append(item)
+            attempts.append(_refreshed(item))
     return config, attempts
+
+
+def _refreshed(line: dict[str, Any]) -> dict[str, Any]:
+    """Диагностика пересчитывается из сохранённой записи хода: новая метрика появляется
+    и в отчёте старого прогона, без вызовов модели. Записи нет — остаётся сохранённая."""
+    record = line.get("turn_record")
+    if not isinstance(record, dict):
+        return line
+    response = line.get("response")
+    answer = str(response.get("answer") or "") if isinstance(response, dict) else ""
+    question = str((line.get("question") or {}).get("question") or "")
+    return {**line, "diagnostics": diagnose(record, question, answer)}
 
 
 def base_id(line: dict[str, Any]) -> str:
@@ -290,12 +302,17 @@ def _diagnostics(attempts: list[dict[str, Any]]) -> list[str]:
             ("Ходов, остановленных бюджетом", _share(_sum(diags, "budget_stop"), turns)),
             ("Вызовов инструментов не по схеме", _share(_sum(diags, "invalid_calls"), tool_calls)),
             ("Вызовов инструментов вопреки запрету", str(_sum(diags, "tool_calls_after_ban"))),
+            ("Ответов модели с вызовом инструмента в тексте", str(_sum(diags, "calls_in_text"))),
             ("Путь разбора итога", ", ".join(f"{k}: {v}" for k, v in paths.most_common())),
             (
                 "Ходов с calculate среди вопросов с числом в ожидании",
                 _share(_sum(numeric, "calculate_used"), len(numeric)),
             ),
             ("Опора чисел ответа на результаты инструментов или вопрос", _share(grounded, numbers)),
+            (
+                "Опора входов расчёта на результаты других инструментов или вопрос",
+                _share(_sum(diags, "calculate_inputs_grounded"), _sum(diags, "calculate_inputs")),
+            ),
         ]
     )
 

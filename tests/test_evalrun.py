@@ -233,7 +233,54 @@ def test_diagnostics_from_the_turn_record() -> None:
     assert (diag["searches"], diag["empty_searches"], diag["invalid_calls"]) == (2, 1, 1)
     assert diag["calculate_used"] and diag["outcome_replaced"]
     assert (diag["numbers"], diag["numbers_grounded"]) == (4, 3)
+    assert diag["calls_in_text"] == 0
     assert diagnose(None, "", "") is None
+
+
+def test_calculate_inputs_and_calls_in_text() -> None:
+    # Вызов запроса к хранилищу ушёл в текст и не выполнен; в расчёт подано выдуманное число.
+    leaked = '<|tool_call>call:query_kpi{table:<|"|>production<|"|>}<tool_call|>'
+    record: dict[str, Any] = {
+        "calls": [
+            {
+                "content": leaked,
+                "tool_calls": [
+                    {"name": "search_documents", "status": "ok", "result": "план 2 970 т"}
+                ],
+            },
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "name": "calculate",
+                        "status": "ok",
+                        "arguments": '{"operation": "expression",'
+                        ' "expression": "114300 / (2970 * 14) * 100"}',
+                        "result": "274.9 114300",
+                    }
+                ],
+            },
+        ]
+    }
+    diag = diagnose(record, "Выполнение плана за 14 дней?", "274.9 %")
+    assert diag is not None
+    assert diag["calls_in_text"] == 1
+    # Одинокий маркер без тела вызова — не потерянный вызов.
+    record["calls"][0]["content"] = "<|tool_call>"
+    stray = diagnose(record, "Выполнение плана за 14 дней?", "")
+    assert stray is not None and stray["calls_in_text"] == 0
+    record["calls"][0]["content"] = leaked
+    # 2970 — из поиска, 14 — из вопроса, 100 — постоянная; 114300 опоры не имеет, хотя
+    # и стоит в результате самого расчёта.
+    assert (diag["calculate_inputs"], diag["calculate_inputs_grounded"]) == (3, 2)
+
+    # Список чисел: каждое — свой вход, а не одно склеенное число.
+    record["calls"][1]["tool_calls"][0]["arguments"] = (
+        '{"operation": "percent", "numbers": [2970, 137400]}'
+    )
+    diag = diagnose(record, "Выполнение плана за 14 дней?", "")
+    assert diag is not None
+    assert (diag["calculate_inputs"], diag["calculate_inputs_grounded"]) == (2, 1)
 
 
 def test_fragment_label_matches_its_parts() -> None:
@@ -560,3 +607,13 @@ def test_run_where_the_service_never_answered_keeps_the_old_result(
     assert run(env, _fake({"prefix_hash": "h"}, (200, []), [])) == 1
     assert (out / "results.jsonl").read_text(encoding="utf-8") == "прежний итог\n"
     assert "итог не обновлён" in capsys.readouterr().err
+
+
+def test_report_recomputes_diagnostics_from_the_saved_turn_record(tmp_path: Path) -> None:
+    # Прогон записан до появления метрики: отчёт считает её заново по записи хода.
+    line = _line("q1", 1, True)
+    line["diagnostics"] = {"numbers": 0}
+    line["turn_record"] = {"calls": [{"content": "<|tool_call>call:query_kpi{}<tool_call|>"}]}
+    path = _results(tmp_path / "results.jsonl", {"run_id": "r"}, [line])
+    _, attempts = read(path)
+    assert attempts[0]["diagnostics"]["calls_in_text"] == 1
