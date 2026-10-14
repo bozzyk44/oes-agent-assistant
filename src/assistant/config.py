@@ -5,9 +5,11 @@
 нет. Попасть во вход модели ему неоткуда.
 """
 
+import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any, Literal
 
 # Метка из .env.example: значение, которое `make run` заменяет случайным секретом.
 PLACEHOLDER = "__GENERATE__"
@@ -20,12 +22,25 @@ class ConfigError(Exception):
     """Сервис не может стартовать; в тексте только имена переменных, значений нет."""
 
 
+FormatMode = Literal["last", "all", "off"]
+FORMAT_MODES: tuple[FormatMode, ...] = ("last", "all", "off")
+
+
 @dataclass(frozen=True)
 class ModelSettings:
     base_url: str
     # Ключ не показывается ни в repr настроек, ни в журнале.
     api_key: str = field(repr=False)
     name: str
+    # Потолок выхода одного вызова: ограничивает цену и задержку хода.
+    max_output_tokens: int = 1024
+    # Предел времени одного вызова, секунды; сумма по ходу — меньше срока захвата сессии.
+    timeout_seconds: float = 20.0
+    # Принуждение к формату ответа: только на последнем вызове хода, на всех или выключено.
+    response_format: FormatMode = "last"
+    # Параметры конкретного провайдера, которых нет в общем протоколе. Значения могут
+    # быть чувствительными, поэтому в repr их нет.
+    extra_body: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
     def configured(self) -> bool:
@@ -92,6 +107,27 @@ def _required(env: Mapping[str, str], name: str) -> str:
     return value
 
 
+def _format_mode(env: Mapping[str, str]) -> FormatMode:
+    raw = env.get("MODEL_RESPONSE_FORMAT", "").strip() or "last"
+    for mode in FORMAT_MODES:
+        if raw == mode:
+            return mode
+    raise ConfigError(f"MODEL_RESPONSE_FORMAT: ожидалось одно из {', '.join(FORMAT_MODES)}")
+
+
+def _extra_body(env: Mapping[str, str]) -> dict[str, Any]:
+    raw = env.get("MODEL_EXTRA_BODY", "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        raise ConfigError("MODEL_EXTRA_BODY: ожидался объект JSON") from None
+    if not isinstance(value, dict):
+        raise ConfigError("MODEL_EXTRA_BODY: ожидался объект JSON")
+    return value
+
+
 def load_settings(env: Mapping[str, str]) -> Settings:
     settings = Settings(
         database_url=_required(env, "DATABASE_URL"),
@@ -100,6 +136,10 @@ def load_settings(env: Mapping[str, str]) -> Settings:
             base_url=env.get("MODEL_BASE_URL", "").strip(),
             api_key=env.get("MODEL_API_KEY", "").strip(),
             name=env.get("MODEL_NAME", "").strip(),
+            max_output_tokens=_count(env, "MODEL_MAX_OUTPUT_TOKENS", 1024),
+            timeout_seconds=_seconds(env, "MODEL_TIMEOUT_SECONDS", 20),
+            response_format=_format_mode(env),
+            extra_body=_extra_body(env),
         ),
         toir_url=env.get("TOIR_URL") or "http://toir:8001",
         max_message_chars=_count(env, "MAX_MESSAGE_CHARS", 4000),

@@ -21,6 +21,7 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     Table,
+    func,
     select,
 )
 
@@ -178,6 +179,38 @@ def _canonical_sites(grants: Grants, named: frozenset[str]) -> frozenset[str]:
         known = ", ".join(sorted(grants.known_sites))
         raise _Invalid(f"filters: {unknown[0]!r} — не код участка; коды участков: {known}")
     return frozenset(codes[site_key(site)] for site in named)
+
+
+@dataclass(frozen=True)
+class Period:
+    first: date
+    last: date
+
+
+def data_periods(connection: Connection, grants: Grants) -> dict[str, Period]:
+    """Период данных в доступных пользователю строках: по датам добычи и началу простоев.
+
+    Нужен для сведений о пользователе во входе модели: вопрос «за вчера» она соотносит
+    с периодом данных, а не с текущей датой, которой во входе нет.
+    """
+    periods: dict[str, Period] = {}
+    for name, column in (("production", "date"), ("downtime", "start")):
+        sites = grants.kpi_sites(name)
+        if not sites:
+            continue
+        table = TABLES[name]
+        found = connection.execute(
+            select(func.min(table.c[column]), func.max(table.c[column])).where(
+                table.c[SITE].in_(sorted(sites))
+            )
+        ).one()
+        if found[0] is not None:
+            first, last = found
+            periods[name] = Period(
+                first.date() if isinstance(first, datetime) else first,
+                last.date() if isinstance(last, datetime) else last,
+            )
+    return periods
 
 
 def _limit(value: object) -> int:

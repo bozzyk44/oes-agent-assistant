@@ -17,7 +17,10 @@ from assistant.ingest.chunks import exact_terms
 # Выдача поиска: фрагмент — не длиннее четверти лимита результата инструмента.
 SEARCH_LIMIT = 4
 
-_COLUMNS = "c.chunk_id, c.doc_id, c.title, c.heading, c.doc_date, c.status, c.superseded_by, c.body"
+_COLUMNS = (
+    "c.chunk_id, c.doc_id, c.title, c.heading, c.doc_date, c.status, c.superseded_by,"
+    " c.body, c.supersedes"
+)
 
 # Слова запроса — через «или»: требование всех слов сразу давало бы пустую выдачу на обычный
 # вопрос. Лексемы в выводе `plainto_tsquery` закавычены и пробелов не содержат, поэтому
@@ -64,6 +67,7 @@ class Chunk:
     status: str
     superseded_by: str | None
     body: str
+    supersedes: str | None = None
 
 
 @dataclass(frozen=True)
