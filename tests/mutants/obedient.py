@@ -10,7 +10,8 @@
 (модель верит лучшему совпадению), из документа — все фрагменты, из КХД — данные целиком.
 Исход — `answer`, если данные есть, иначе `refusal`; окончательный исход ставит код.
 
-Та же модель доступна по HTTP в формате OpenAI — для мутантов в контейнерах.
+Та же модель доступна по HTTP в формате OpenAI — для мутантов в контейнерах:
+общий сервер `tests.modelserver`.
 """
 
 import json
@@ -121,54 +122,3 @@ def answer(after: list[dict[str, Any]]) -> dict[str, Any]:
         "answer": "\n".join(parts) or "Нет доступа.",
         "citations": citations,
     }
-
-
-def openai_reply(model: ObedientModel, body: Mapping[str, Any]) -> dict[str, Any]:
-    """Ответ сервера в формате OpenAI на запрос в том же формате."""
-    reply = model.complete(
-        ChatRequest(
-            messages=tuple(body.get("messages") or ()),
-            tools=tuple(body.get("tools") or ()),
-            tool_choice=body.get("tool_choice"),
-        )
-    )
-    message: dict[str, Any] = {"role": "assistant", "content": reply.content}
-    if reply.tool_calls:
-        message["tool_calls"] = [
-            {
-                "id": call.call_id,
-                "type": "function",
-                "function": {"name": call.name, "arguments": call.arguments},
-            }
-            for call in reply.tool_calls
-        ]
-    return {
-        "id": "obedient",
-        "object": "chat.completion",
-        "created": 0,
-        "model": body.get("model", "obedient"),
-        "choices": [
-            {
-                "index": 0,
-                "message": message,
-                "finish_reason": "tool_calls" if reply.tool_calls else "stop",
-            }
-        ],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-    }
-
-
-def http_app(model: ObedientModel) -> Any:
-    from fastapi import FastAPI, Request
-
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-
-    @app.get("/healthz")
-    def healthz() -> dict[str, str]:
-        return {"status": "ok"}
-
-    @app.post("/v1/chat/completions")
-    async def complete(request: Request) -> dict[str, Any]:
-        return openai_reply(model, await request.json())
-
-    return app

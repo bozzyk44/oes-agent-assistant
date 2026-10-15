@@ -1,0 +1,29 @@
+# Сценарий сборки: заглушка модели отдельным контейнером и сервис, направленный на неё.
+# Дополняет compose.yaml и подключается только сценарием `make smoke` (scripts/smoke.sh):
+# в базовый `docker compose up` заглушка не попадает. Заглушка живёт в образе стадии dev —
+# это тот же сценарный объект, что в тестах (tests/modelstub.py), за HTTP-обёрткой
+# tests/modelserver.py. Наружу её порт не публикуется: сервис ходит в неё по сети compose.
+
+services:
+  modelstub:
+    build:
+      context: .
+      target: dev
+    command: ["python", "-m", "tests.modelserver"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8003/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
+    mem_limit: 256m
+
+  assistant:
+    environment:
+      # Адрес — заглушки, ключ — метка: настоящий ключ модели сюда не попадает.
+      MODEL_BASE_URL: http://modelstub:8003/v1
+      MODEL_API_KEY: smoke-stub-key
+    depends_on:
+      modelstub:
+        condition: service_healthy
