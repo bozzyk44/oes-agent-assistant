@@ -6,6 +6,22 @@
 	basic_auth {
 		{$PROXY_USER} {$PROXY_PASSWORD_HASH}
 	}
-	reverse_proxy assistant:8000
+
+	# Grafana наблюдаемости — под тем же паролем, по пути /grafana/ (решение 23). Без профиля
+	# observability контейнера lgtm нет, и прокси отвечает 502, а не страницей сервиса.
+	# Заголовок с паролем прокси в Grafana не уходит: она приняла бы его за попытку входа.
+	# redir — внутри handle: на верхнем уровне Caddy выполняет его раньше basic_auth.
+	handle /grafana {
+		redir * /grafana/
+	}
+	handle /grafana/* {
+		reverse_proxy lgtm:3000 {
+			header_up -Authorization
+		}
+	}
+
+	handle {
+		reverse_proxy assistant:8000
+	}
 	header -Server
 }

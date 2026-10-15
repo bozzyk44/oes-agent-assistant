@@ -28,16 +28,23 @@ sh scripts/make-env.sh </dev/null
 # Файл собирается рядом и заменяет прежний целиком, с правами только для владельца.
 umask 077
 names=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' ../model.env)
-# Профили compose: прочие, заданные на сервере руками, сохраняются; proxy — по имени стенда.
-profiles=$(sed -n 's/^COMPOSE_PROFILES=//p' ../.env | tail -n 1 | tr ',' '\n' | grep -vx 'proxy' | grep -v '^$' || true)
+# Профили compose: прочие, заданные на сервере руками, сохраняются; proxy — по имени стенда,
+# observability — по STAND_OBSERVABILITY=1 вместе с адресом приёмника для сервиса.
+profiles=$(sed -n 's/^COMPOSE_PROFILES=//p' ../.env | tail -n 1 | tr ',' '\n' | grep -vx -e 'proxy' -e 'observability' | grep -v '^$' || true)
 if grep -q '^STAND_DOMAIN=.' ../model.env; then
     profiles=$(printf '%s\nproxy' "$profiles")
 fi
+otel=
+if grep -qx 'STAND_OBSERVABILITY=1' ../model.env; then
+    profiles=$(printf '%s\nobservability' "$profiles")
+    otel=http://lgtm:4318
+fi
 profiles=$(printf '%s\n' "$profiles" | grep -v '^$' | paste -sd, - || true)
 {
-    grep -v -E "^($(printf '%s|' $names SERVICE_BIND COMPOSE_PROFILES | sed 's/|$//'))=" ../.env || true
+    grep -v -E "^($(printf '%s|' $names SERVICE_BIND COMPOSE_PROFILES OTEL_EXPORTER_OTLP_ENDPOINT | sed 's/|$//'))=" ../.env || true
     cat ../model.env
     [ -z "$profiles" ] || echo "COMPOSE_PROFILES=$profiles"
+    echo "OTEL_EXPORTER_OTLP_ENDPOINT=$otel"
     # 0.0.0.0 — только на сервере, где группу безопасности создаёт Terraform этого
     # репозитория; на сервере из панели — 127.0.0.1, проверка через SSH-туннель.
     echo "SERVICE_BIND=$bind"
@@ -50,6 +57,11 @@ rm -f ../model.env
 case ",$profiles," in
     *,proxy,*) ;;
     *) docker compose -p oes-assistant --profile proxy rm --stop --force proxy </dev/null ;;
+esac
+# То же с наблюдаемостью: выключенная, она занимала бы до 1,2 ГБ памяти.
+case ",$profiles," in
+    *,observability,*) ;;
+    *) docker compose -p oes-assistant --profile observability rm --stop --force lgtm </dev/null ;;
 esac
 
 # Скрипт читается из stdin: дочерние команды его не получают.

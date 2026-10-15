@@ -18,7 +18,7 @@ help:
 	@echo "make data   — сгенерировать набор в data/"
 	@echo "make data-holdout — набор для итоговой проверки с другим зерном в holdout/"
 	@echo "make run    — создать .env при необходимости и поднять сервис, заглушку ТОиР и PostgreSQL"
-	@echo "make observe — то же, что run, плюс наблюдаемость: трассы, метрики и журнал в Grafana на 127.0.0.1:3000"
+	@echo "make observe — то же, что run, плюс наблюдаемость: трассы, метрики и журнал в Grafana на 127.0.0.1:3000/grafana/"
 	@echo "make down   — остановить; том базы остаётся"
 	@echo "make reset  — остановить и удалить том базы"
 	@echo "make test   — линтер, типы и тесты, без сети и модели"
@@ -58,7 +58,7 @@ run: env
 	$(COMPOSE) up --build
 
 # Сервис с наблюдаемостью: контейнер grafana/otel-lgtm и адрес приёмника для сервиса.
-# Grafana — http://127.0.0.1:3000. Заданные в оболочке переменные сильнее .env.
+# Grafana — http://127.0.0.1:3000/grafana/. Заданные в оболочке переменные сильнее .env.
 observe: env
 	COMPOSE_PROFILES=observability OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 $(COMPOSE) up --build
 
