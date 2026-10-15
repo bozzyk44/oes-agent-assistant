@@ -131,6 +131,7 @@ def diagnose(
     return {
         "parse_path": record.get("parse_path"),
         "outcome_replaced": "outcome_replaced" in record,
+        "refusal_replaced": "refusal_unsourced" in record,
         "dropped_citations": len(record.get("dropped_citations", []) or []),
         "budget_stop": "stopped" in record,
         "tool_calls": len(executed),

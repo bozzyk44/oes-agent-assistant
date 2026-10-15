@@ -32,6 +32,8 @@ from assistant.tools.schemas import KPI_COLUMNS, KpiArgs, KpiPeriod
 DURATION = "duration_hours"
 SINCE_PPR = "hours_since_ppr"
 DATE = "date"
+# Пояснение к отказу — только категория, как у документа по идентификатору.
+DENIED_NOTE = "Доступа нет."
 _NUMERIC = {
     "production": ("tonnes", "shift"),
     "downtime": (DURATION,),
@@ -107,6 +109,11 @@ def run_kpi(connection: Connection, grants: Grants, args: KpiArgs) -> KpiAnswer:
     if found.status is not Status.OK:
         if found.status is Status.INVALID:
             answer.note = found.problem
+        elif found.status is Status.DENIED:
+            # Только категория: пояснение к данным при отказе читалось как указание
+            # посчитать — модель называла выдуманное число (EVAL.md, провал 6).
+            # Период, посчитанный кодом, — пересказ запроса, а не данные: остаётся.
+            answer.note = " ".join(part for part in (resolved, DENIED_NOTE) if part)
         return answer
 
     rows = [_with_derived(args.table, row, bounds) for row in found.rows]
@@ -175,7 +182,7 @@ def _note(found: KpiResult, args: KpiArgs, bounds: tuple[datetime, datetime] | N
         parts.append(f"Такого оборудования нет: {', '.join(found.missing_equipment)}.")
     if found.status is Status.NOT_FOUND:
         parts.append("Такого оборудования нет; список своего — запросом к equipment без фильтра.")
-    if args.table == "downtime" and bounds is not None:
+    if args.table == "downtime" and bounds is not None and found.status is Status.OK:
         parts.append(
             "Длительность простоя — часть интервала внутри периода; при группировке по дням"
             " интервал через полночь делится между сутками."

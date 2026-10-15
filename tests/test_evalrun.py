@@ -210,6 +210,7 @@ def test_diagnostics_from_the_turn_record() -> None:
         "history_chunks": ["D1#1"],
         "parse_path": "json",
         "outcome_replaced": {"proposed": "answer", "set": "refusal"},
+        "refusal_unsourced": ["124.5"],
         "dropped_citations": ["X#1"],
         "calls": [
             {
@@ -231,7 +232,7 @@ def test_diagnostics_from_the_turn_record() -> None:
     assert diag is not None
     assert diag["docs_in_input"] == ["D1", "D2"]
     assert (diag["searches"], diag["empty_searches"], diag["invalid_calls"]) == (2, 1, 1)
-    assert diag["calculate_used"] and diag["outcome_replaced"]
+    assert diag["calculate_used"] and diag["outcome_replaced"] and diag["refusal_replaced"]
     assert (diag["numbers"], diag["numbers_grounded"]) == (4, 3)
     assert diag["calls_in_text"] == 0
     assert diagnose(None, "", "") is None

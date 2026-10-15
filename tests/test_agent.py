@@ -17,8 +17,9 @@ from assistant.model import (
     ToolCall,
     TransientModelError,
 )
+from assistant.tools.box import unsourced_numbers
 from assistant.tools.schemas import CALCULATE, DOCUMENT, KPI, REPAIR, SEARCH
-from assistant.turn.agent import MAX_CALLS, AgentHandler
+from assistant.turn.agent import MAX_CALLS, REFUSAL_ANSWER, AgentHandler
 from assistant.turn.prefix import PREFIX
 from tests.conftest import Database
 from tests.modelstub import ScriptedModel, call, final, tools
@@ -414,6 +415,124 @@ def test_citations_only_from_input_and_outcome_from_table(database: Database, sm
     assert "500 моточасов" not in model.inputs()
     note = _results(model, SEARCH)[0].get("note", "")
     assert "прежняя редакция" in note
+
+
+def _downtime_k2() -> Any:
+    return call(
+        KPI,
+        table="downtime",
+        filters=[{"column": "site", "op": "eq", "value": "K2"}],
+        aggregates=[{"function": "sum", "column": "duration_hours"}],
+        period={"date_from": "2026-03-01", "date_to": "2026-03-15"},
+    )
+
+
+def test_kpi_denial_carries_only_the_category(database: Database, small: Path) -> None:
+    model = ScriptedModel([tools(_downtime_k2()), final("Нет доступа", "refusal")])
+    service, _ = _service(database, model)
+    service.turn("u-k1", new_session(), "Сколько простоя на K2 с 01.03.2026 по 15.03.2026?")
+    # Пояснение к данным при отказе читалось как указание посчитать.
+    assert _results(model, KPI) == [{"status": "denied", "note": "Доступа нет.", "blocks": ""}]
+
+
+def test_refusal_with_unsourced_number_is_replaced(database: Database, small: Path) -> None:
+    model = ScriptedModel(
+        [tools(_downtime_k2()), final("На K2 с 01.03.2026 по 15.03.2026 было 124.5 ч", "refusal")]
+    )
+    service, _ = _service(database, model)
+    session = new_session()
+    reply = service.turn("u-k1", session, "Сколько простоя на K2 с 01.03.2026 по 15.03.2026?")
+    assert (reply.body["outcome"], reply.body["answer"]) == ("refusal", REFUSAL_ANSWER)
+    # В истории — заменённый текст: выдуманное число не вернётся в следующий ход.
+    model.steps = [final("Ок", "answer")]
+    service.turn("u-k1", session, "Понятно")
+    assert "124.5" not in model.inputs()
+
+
+def test_refusal_with_numbers_from_input_is_kept(database: Database, small: Path) -> None:
+    answer = "Данных по K2 за 01.03.2026–15.03.2026 вам не показать: доступ только к K1"
+    model = ScriptedModel([tools(_downtime_k2()), final(answer, "refusal")])
+    service, _ = _service(database, model)
+    reply = service.turn("u-k1", new_session(), "Сколько простоя на K2 с 01.03.2026 по 15.03.2026?")
+    assert (reply.body["outcome"], reply.body["answer"]) == ("refusal", answer)
+
+
+def test_answer_numbers_are_matched_whole_and_dates_by_parts() -> None:
+    source = "Данные с 2026-03-01 по 2026-03-15; участок K1; итог 2 852,50"
+    assert unsourced_numbers("с 01.03.2026 по 15.03.2026, K1, 2852.5", source) == []
+    # Группа цифр числа источника опорой не служит: ни дробная часть, ни кусок даты целиком.
+    assert unsourced_numbers("50 и 202603", source) == ["50", "202603"]
+    assert unsourced_numbers("было 124.5 ч, а не 0", source) == ["124.5", "0"]
+    # Число не опирается на часть другого числа.
+    assert unsourced_numbers("285", source) == ["285"]
+    # Дата в конце предложения и без года — тоже дата, а не дробное число.
+    assert unsourced_numbers("Данных нет до 15.03.2026. С 01.03 — тоже.", source) == []
+    # Пробел между двумя числами их не склеивает; разряды одного числа склеивает.
+    assert unsourced_numbers("с 01.03.2026 15.03.2026 нет", source) == []
+    assert unsourced_numbers("итог 2 852,50", source) == []
+
+
+def test_refusal_leans_on_user_info_and_earlier_user_messages(
+    database: Database, small: Path
+) -> None:
+    model = ScriptedModel(
+        [
+            final("Уточните участок", "answer"),
+            tools(_downtime_k2()),
+            final("Смена 7 — не ваша; данные у вас только по 02.01.2026", "refusal"),
+        ]
+    )
+    service, _ = _service(database, model)
+    session = new_session()
+    service.turn("u-k1", session, "Что со сменой 7?")
+    reply = service.turn("u-k1", session, "Сколько простоя у соседей с 05.03.2026 по 15.03.2026?")
+    # «7» — только из прошлой реплики пользователя; 2 и 1 из даты — только из сведений
+    # о пользователе: последний день его данных.
+    assert reply.body["answer"] == "Смена 7 — не ваша; данные у вас только по 02.01.2026"
+    # Тот же отказ в новой сессии: «7» уже не из чего взять.
+    model.steps = [
+        tools(_downtime_k2()),
+        final("Смена 7 — не ваша; данные у вас только по 02.01.2026", "refusal"),
+    ]
+    reply = service.turn("u-k1", new_session(), "Сколько простоя у соседей?")
+    assert reply.body["answer"] == REFUSAL_ANSWER
+
+
+def test_refusal_does_not_lean_on_earlier_model_answers(database: Database, small: Path) -> None:
+    model = ScriptedModel(
+        [
+            final("Простой на K1 — 124.5 ч", "answer"),
+            tools(_downtime_k2()),
+            final("На K2, как и на K1, 124.5 ч", "refusal"),
+        ]
+    )
+    service, _ = _service(database, model)
+    session = new_session()
+    service.turn("u-k1", session, "Сколько простоя на K1?")
+    reply = service.turn("u-k1", session, "Сколько простоя на K2 с 01.03.2026 по 15.03.2026?")
+    # Число из прежнего ответа модели могло быть выдумано: опорой для отказа оно не служит.
+    assert reply.body["answer"] == REFUSAL_ANSWER
+
+
+def test_kpi_denial_keeps_the_period_computed_by_code(database: Database, small: Path) -> None:
+    model = ScriptedModel(
+        [
+            tools(
+                call(
+                    KPI,
+                    table="downtime",
+                    filters=[{"column": "site", "op": "eq", "value": "K2"}],
+                    period={"relative": "last_7_days"},
+                )
+            ),
+            final("Нет доступа", "refusal"),
+        ]
+    )
+    service, _ = _service(database, model)
+    service.turn("u-k1", new_session(), "Простой на K2 за неделю?")
+    (result,) = _results(model, KPI)
+    assert result["status"] == "denied"
+    assert result["note"].startswith("Период «") and result["note"].endswith("Доступа нет.")
 
 
 def test_history_is_visible_in_the_next_turn(database: Database, small: Path) -> None:
