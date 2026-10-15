@@ -5,12 +5,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from evalrun.__main__ import _judge
 from evalrun.judge import BY_NAME, Item, Judge, applicable, item_from_attempt, parse
 from evalrun.judgecheck import (
     CLAIM,
     COMPLY,
     HINT,
+    JudgeUnavailable,
     _drop_last,
     _other_number,
     ask_all,
@@ -245,10 +248,9 @@ def test_bad_provider_reply_does_not_break_the_run() -> None:
         raise RuntimeError("сеть")
 
     judge = Judge("http://j", "", "m", raising)
-    calls = ask_all([(_item(), BY_NAME["grounding"], {"repeat": 1})] * 3, judge)
-    assert len(calls) == 3 and all(call["verdict"] is None for call in calls)
-    assert calls[0]["problem"] == "ошибка вызова: RuntimeError"
-    assert calls[0]["judge_model"] == "m"
+    # Ошибка на первом же вызове — запуск останавливается до отправки остальных.
+    with pytest.raises(JudgeUnavailable, match="RuntimeError"):
+        ask_all([(_item(), BY_NAME["grounding"], {"repeat": 1})] * 3, judge)
 
 
 def test_number_is_replaced_only_when_it_is_whole_in_materials() -> None:
@@ -263,3 +265,114 @@ def test_service_model_key_goes_only_with_its_address() -> None:
     assert _judge(env, lambda *_: (200, {})).api_key == "svc-key"
     other = _judge({**env, "JUDGE_BASE_URL": "http://other"}, lambda *_: (200, {}))
     assert other.base_url == "http://other" and other.api_key == ""
+
+
+def _passes(false_clean: int, unstable_clean: int) -> bool:
+    calls = []
+    for number in range(5):
+        calls += _calls("grounding", True, [True] * 3, f"s/d{number}/a1")
+    for number in range(10):
+        if number < false_clean:
+            verdicts: list[bool | None] = [True] * 3
+        elif number < false_clean + unstable_clean:
+            verdicts = [False, False, True]
+        else:
+            verdicts = [False] * 3
+        calls += _calls("grounding", False, verdicts, f"s/c{number}/a1")
+    return score(calls)["grounding"].passed()
+
+
+def test_false_rejects_and_stability_each_block_the_criterion() -> None:
+    assert _passes(0, 0)
+    assert _passes(1, 0)  # 1 из 10 — на границе 10 %
+    assert not _passes(2, 0)  # 2 из 10 ложных браковок
+    assert _passes(0, 1)  # 14 из 15 устойчивы
+    assert not _passes(0, 2)  # 13 из 15 — ниже 90 %
+
+
+def test_results_keep_task_order_with_failures_in_between() -> None:
+    def transport(method: str, url: str, headers: dict[str, str], body: Any) -> Any:
+        text = body["messages"][1]["content"]
+        if "плохой" in text:
+            raise RuntimeError("сеть")
+        content = json.dumps({"verdict": "нет", "quote": ""})
+        return 200, {"choices": [{"message": {"content": content}}], "usage": {}}
+
+    judge = Judge("http://j", "", "m", transport)
+    tasks: list[Any] = [
+        (
+            _item(key=f"s/q{n}/a1", answer="плохой" if n % 3 == 1 else "хороший"),
+            BY_NAME["grounding"],
+            {},
+        )
+        for n in range(9)
+    ]
+    sunk: list[Any] = []
+    calls = ask_all(tasks, judge, sink=sunk.append)
+    assert [call["key"] for call in calls] == [f"s/q{n}/a1" for n in range(9)]
+    assert [call["verdict"] is None for call in calls] == [n % 3 == 1 for n in range(9)]
+    assert len(sunk) == 9  # каждый вызов сразу ушёл в файл
+
+
+def test_unavailable_judge_stops_before_the_batch_and_keeps_the_old_check(
+    tmp_path: Path,
+) -> None:
+    from evalrun.__main__ import judge_command
+    from evalrun.judgecheck import Entry
+
+    folder = tmp_path / "judge"
+    folder.mkdir()
+    entry = Entry(_item(), "grounding", False, "настоящий")
+    (folder / "set.jsonl").write_text(json.dumps(entry.to_json()) + "\n", "utf-8")
+    (folder / "check.jsonl").write_text("прежняя проверка\n", "utf-8")
+    sent: list[Any] = []
+
+    def refusing(*args: Any) -> Any:
+        sent.append(args)
+        return 401, None
+
+    env = {"EVAL_DIR": str(tmp_path), "JUDGE_MODEL": "m", "MODEL_BASE_URL": "http://svc"}
+    assert judge_command(["judge-check"], env, refusing) == 1
+    assert len(sent) == 1  # остальные вызовы не отправлялись
+    assert (folder / "check.jsonl").read_text("utf-8") == "прежняя проверка\n"
+
+
+def test_judge_refuses_a_check_made_by_another_configuration(tmp_path: Path) -> None:
+    from evalrun.__main__ import judge_command
+
+    folder = tmp_path / "judge"
+    folder.mkdir()
+    calls = [
+        {**call, "judge_model": "other", "judge_extra": {}}
+        for call in _calls("grounding", True, [True] * 3, "s/d/a1")
+    ]
+    (folder / "check.jsonl").write_text("".join(json.dumps(call) + "\n" for call in calls), "utf-8")
+    results = _results(tmp_path / "results.jsonl", [_attempt("q1", "Добыто 120 т.", "answer")])
+    sent: list[Any] = []
+    env = {"EVAL_DIR": str(tmp_path), "JUDGE_MODEL": "m", "MODEL_BASE_URL": "http://svc"}
+
+    def recording(*args: Any) -> Any:
+        sent.append(args)
+        return 200, {}
+
+    code = judge_command(["judge", str(results), "data"], env, recording)
+    assert code == 1 and not sent
+    assert not (tmp_path / "results.judge.md").exists()
+
+
+def test_completeness_spoil_and_first_attempts_only(tmp_path: Path) -> None:
+    two = {
+        **_attempt("q6", "Отвечает Иванова Анна. Телефон 12-34.", "answer"),
+        "question": {"id": "q6", "question": "Кто и телефон?", "must_cite": ["A", "B"]},
+    }
+    later = {**_attempt("q1", "Добыто 120 т.", "answer", attempt=2)}
+    data = _results(tmp_path / "data.jsonl", [two, {**two, "attempt": 2}, later])
+    entries = build_set({"data": data}, {})
+    kinds = {(entry.item.key, entry.criterion, entry.kind) for entry in entries}
+    assert ("data/q6/a1/drop", "completeness", "пропуск") in kinds
+    assert ("data/q6/a2", "completeness", "настоящий") in kinds
+    dropped = next(entry for entry in entries if entry.item.key == "data/q6/a1/drop")
+    assert dropped.item.answer == "Отвечает Иванова Анна."
+    # Опора на источники для чистых — только первая попытка набора data.
+    grounding = {entry.item.key for entry in entries if entry.criterion == "grounding"}
+    assert "data/q1/a2" not in grounding

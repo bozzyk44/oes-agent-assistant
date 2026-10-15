@@ -260,11 +260,25 @@ WORKERS = 8
 Task = tuple[Item, Criterion, dict[str, Any]]
 
 
+class JudgeUnavailable(RuntimeError):
+    """Судья не отвечает на первый же вызов: адрес, ключ или модель неверны."""
+
+
+# Доля разобранных вердиктов, ниже которой проверка не заменяет прежнюю: ответы из одних
+# «не разобрано» — сбой судьи, а не результат.
+MIN_PARSED = 0.5
+
+
 def ask_all(
-    tasks: list[Task], judge: Judge, progress: Callable[[int, int], None] = lambda *_: None
+    tasks: list[Task],
+    judge: Judge,
+    progress: Callable[[int, int], None] = lambda *_: None,
+    sink: Callable[[dict[str, Any]], None] = lambda _: None,
 ) -> list[dict[str, Any]]:
     """Вызовы судьи параллельно, `WORKERS` сразу: каждый вызов — отдельный запрос без
-    общего состояния. Результат — в порядке задач."""
+    общего состояния. Результат — в порядке задач; каждый готовый вызов сразу уходит
+    в `sink`, чтобы оплаченное не терялось при обрыве. Первый вызов — отдельно: если судья
+    не отвечает вовсе, остальные не отправляются. Прерывание отменяет неначатые вызовы."""
 
     def one(task: Task) -> dict[str, Any]:
         item, criterion, extra = task
@@ -284,13 +298,31 @@ def ask_all(
             "output_tokens": verdict.output_tokens,
         }
 
-    results: list[dict[str, Any] | None] = [None] * len(tasks)
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = {pool.submit(one, task): number for number, task in enumerate(tasks)}
-        for done, future in enumerate(as_completed(futures), start=1):
-            results[futures[future]] = future.result()
+    if not tasks:
+        return []
+    first = one(tasks[0])
+    if str(first["problem"]).startswith(("судья не ответил", "ошибка вызова")):
+        raise JudgeUnavailable(str(first["problem"]))
+    sink(first)
+    progress(1, len(tasks))
+    results: list[dict[str, Any] | None] = [first] + [None] * (len(tasks) - 1)
+    pool = ThreadPoolExecutor(max_workers=WORKERS)
+    try:
+        futures = {pool.submit(one, task): number for number, task in enumerate(tasks) if number}
+        for done, future in enumerate(as_completed(futures), start=2):
+            result = future.result()
+            results[futures[future]] = result
+            sink(result)
             progress(done, len(tasks))
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown()
     return [result for result in results if result is not None]
+
+
+def parsed_share(calls: list[dict[str, Any]]) -> float:
+    return sum(1 for call in calls if call["verdict"] is not None) / len(calls) if calls else 0.0
 
 
 def check(
@@ -298,6 +330,7 @@ def check(
     judge: Judge,
     repeats: int = REPEATS,
     progress: Callable[[int, int], None] = lambda *_: None,
+    sink: Callable[[dict[str, Any]], None] = lambda _: None,
 ) -> list[dict[str, Any]]:
     tasks: list[Task] = [
         (
@@ -308,7 +341,7 @@ def check(
         for entry in entries
         for repeat in range(1, repeats + 1)
     ]
-    return ask_all(tasks, judge, progress)
+    return ask_all(tasks, judge, progress, sink)
 
 
 def _share(part: int, whole: int) -> str:
@@ -321,7 +354,7 @@ def cost(calls: Iterable[Mapping[str, Any]], prices: tuple[float, float] | None)
     tokens_out = sum(int(call["output_tokens"]) for call in items)
     text = f"{len(items)} вызовов судьи, вход {tokens_in} токенов, выход {tokens_out}"
     if prices is not None:
-        text += f", около {(tokens_in * prices[0] + tokens_out * prices[1]) / 1e6:.2f}"
+        text += f", около ${(tokens_in * prices[0] + tokens_out * prices[1]) / 1e6:.2f}"
     return text
 
 
@@ -390,6 +423,7 @@ def judge_run(
     judge: Judge,
     names: list[str],
     progress: Callable[[int, int], None] = lambda *_: None,
+    sink: Callable[[dict[str, Any]], None] = lambda _: None,
 ) -> list[dict[str, Any]]:
     """Судья по первой попытке каждого вопроса прогона — только критерии, прошедшие порог."""
     tasks: list[Task] = [
@@ -398,7 +432,7 @@ def judge_run(
         if item.key.endswith("/a1")
         for criterion in applicable(item, names)
     ]
-    return ask_all(tasks, judge, progress)
+    return ask_all(tasks, judge, progress, sink)
 
 
 def run_report(

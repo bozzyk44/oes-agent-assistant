@@ -18,19 +18,24 @@ import json
 import os
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from evalrun.api import Service, Toir, Transport, urllib_transport
 from evalrun.compare import NotComparable, compare
 from evalrun.judge import Judge
 from evalrun.judgecheck import (
+    MIN_PARSED,
     Entry,
+    JudgeUnavailable,
     build_set,
     check,
     check_report,
     judge_run,
+    parsed_share,
     passed_criteria,
     run_report,
 )
@@ -159,6 +164,19 @@ def _jsonl(path: Path, items: list[dict[str, object]]) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+@contextmanager
+def _appender(path: Path) -> Iterator[Callable[[dict[str, Any]], None]]:
+    """Каждый готовый вызов судьи — сразу строкой в файл: оплаченное не теряется."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as stream:
+
+        def write(call: dict[str, Any]) -> None:
+            stream.write(json.dumps(call, ensure_ascii=False) + "\n")
+            stream.flush()
+
+        yield write
+
+
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
     lines = path.read_text(encoding="utf-8").splitlines()
     return [json.loads(line) for line in lines if line.strip()]
@@ -203,9 +221,23 @@ def judge_command(
     judge = _judge(env, transport)
     if command == "judge-check":
         entries = [Entry.from_json(raw) for raw in _read_jsonl(folder / "set.jsonl")]
-        calls = check(entries, judge, progress=_progress)
+        partial = folder / "check.partial.jsonl"
+        try:
+            with _appender(partial) as sink:
+                calls = check(entries, judge, progress=_progress, sink=sink)
+        except JudgeUnavailable as error:
+            print(f"судья: не отвечает — {error}; прежняя проверка не тронута", file=sys.stderr)
+            return 1
+        if parsed_share(calls) < MIN_PARSED:
+            print(
+                f"судья: разобрано меньше {MIN_PARSED:.0%} вердиктов — прежняя проверка не"
+                f" тронута, вызовы — в {partial}",
+                file=sys.stderr,
+            )
+            return 1
         _jsonl(folder / "check.jsonl", calls)
         (folder / "check.md").write_text(check_report(calls, judge.model, prices), encoding="utf-8")
+        partial.unlink(missing_ok=True)
         print(f"судья: {folder / 'check.md'}")
         return 0
     if command == "judge" and len(argv) == 3:
@@ -221,9 +253,16 @@ def judge_command(
             )
             return 1
         names = passed_criteria(checked, judge.config())
-        calls = judge_run(results, source, judge, names, progress=_progress)
         # Имя — от файла прогона: два прогона в одном каталоге не затирают друг друга.
         target = results.with_name(f"{results.stem}.judge.md")
+        partial = target.with_suffix(".partial.jsonl")
+        try:
+            with _appender(partial) as sink:
+                calls = judge_run(results, source, judge, names, progress=_progress, sink=sink)
+        except JudgeUnavailable as error:
+            print(f"судья: не отвечает — {error}", file=sys.stderr)
+            return 1
+        partial.unlink(missing_ok=True)
         _jsonl(target.with_suffix(".jsonl"), calls)
         target.write_text(run_report(calls, names, judge.model, prices), encoding="utf-8")
         print(f"судья: {target}")
