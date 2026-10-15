@@ -4,6 +4,10 @@
 #   scripts/stand.sh up [аргументы apply]   создать сервер (спросит подтверждение) и развернуть
 #   scripts/stand.sh deploy   выкатить текущий коммит на уже созданный сервер
 #   scripts/stand.sh down     удалить стенд (спросит подтверждение)
+#   scripts/stand.sh cloud-init   напечатать cloud-init для сервера, созданного в панели
+#
+# STAND_HOST=<логин>@<адрес> — выкатка на сервер, созданный не Terraform, а вручную,
+# например бесплатный сервер из панели Cloud.ru: тогда адрес не берётся из Terraform.
 #
 # На сервер уходит закоммиченный код (`git archive`, вместе с data/) и из локального .env —
 # только настройки модели и цены. Пароли базы и TOIR_TOKEN сервер создаёт себе сам из
@@ -28,6 +32,10 @@ die() { echo "stand: $*" >&2; exit 1; }
 
 host() {
     local ip
+    if [[ -n "${STAND_HOST:-}" ]]; then
+        echo "$STAND_HOST"
+        return
+    fi
     ip="$("$tf" output -raw public_ip 2>/dev/null)" || die "стенда нет: сначала scripts/stand.sh up"
     [[ -n "$ip" ]] || die "Terraform не вернул адрес стенда"
     echo "$login@$ip"
@@ -66,6 +74,16 @@ wait_ready() {
     done
     echo "stand: жду окончания первой настройки сервера"
     remote cloud-init status --wait >/dev/null || die "первая настройка сервера не удалась: cloud-init status --long на сервере"
+}
+
+# Тот же cloud-init, что Terraform передаёт серверу: для вставки в форму создания в панели.
+cloud_init() {
+    local pub key
+    pub="$(identity).pub"
+    [[ -f "$pub" ]] || die "нет публичного ключа $pub; задайте STAND_SSH_PUBLIC_KEY_FILE"
+    key="$(tr -d '\n' < "$pub" | sed 's/"/\\"/g')"
+    sed -e "s/\${hostname}/oes-stand/" -e "s/\${login}/$login/g" \
+        -e "s|\${ssh_public_key_yaml}|\"$key\"|" "$root/infra/terraform/cloud-init.yaml.tftpl"
 }
 
 # Настройки модели из локального .env, строками ИМЯ=значение. Файл не исполняется. Каждое имя
@@ -107,9 +125,10 @@ case "${1:-}" in
         deploy
         ;;
     deploy) deploy ;;
+    cloud-init) cloud_init ;;
     down)
         "$tf" destroy
         rm -rf "$state"
         ;;
-    *) die "использование: scripts/stand.sh up | deploy | down" ;;
+    *) die "использование: scripts/stand.sh up | deploy | down | cloud-init" ;;
 esac

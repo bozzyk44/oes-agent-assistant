@@ -12,7 +12,7 @@ HOST_USER := $(shell id -u):$(shell id -g)
 # Коммит для GET /info; вне рабочей копии git — пусто.
 export GIT_COMMIT ?= $(shell git describe --always --dirty 2>/dev/null)
 
-.PHONY: help env data data-holdout run migrate migrate-check down reset test eval eval-report eval-compare mutants smoke ci lock stand stand-deploy stand-destroy
+.PHONY: help env data data-holdout run migrate migrate-check down reset test eval eval-report eval-compare mutants smoke ci lock stand stand-deploy stand-destroy stand-cloud-init
 
 help:
 	@echo "make data   — сгенерировать набор в data/"
@@ -33,6 +33,7 @@ help:
 	@echo "make stand  — создать сервер в облаке (платно, спросит подтверждение) и развернуть на нём сервис"
 	@echo "make stand-deploy — выкатить текущий коммит на созданный стенд"
 	@echo "make stand-destroy — удалить стенд (спросит подтверждение)"
+	@echo "make stand-cloud-init — cloud-init для сервера из панели; выкатка на него: STAND_HOST=oes@<адрес> make stand-deploy"
 
 env:
 	@sh scripts/make-env.sh
@@ -120,6 +121,10 @@ stand-deploy:
 
 stand-destroy:
 	@bash scripts/stand.sh down
+
+# cloud-init для сервера, созданного в панели; выкатка на него — STAND_HOST=<логин>@<адрес> make stand-deploy.
+stand-cloud-init:
+	@bash scripts/stand.sh cloud-init
 
 lock:
 	docker build --quiet --target uv --tag oes-agent-assistant:uv .
