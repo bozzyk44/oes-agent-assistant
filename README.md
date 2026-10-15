@@ -109,7 +109,7 @@ MODEL_NAME=qwen3:32b
 | Векторный поиск | На 18 вопросах разницу не измерить, а сервис должен запускаться на чужом наборе без подготовки. Условие, при котором он нужен, — в [RETRIEVAL.md](docs/architecture/RETRIEVAL.md) |
 | LLM-судья | Прошёл ли вопрос, решают точные проверки. Судья и способ проверить его самого описаны как план в AI_TESTING.md, [#22](https://github.com/bozzyk44/oes-agent-assistant/issues/22) |
 | Трассировка OpenTelemetry и наблюдаемость | Отложены после четырёх правил (решение 3). Сейчас диагностика хода — запись хода `GET /turns/{id}`, её читает прогон. [#15](https://github.com/bozzyk44/oes-agent-assistant/issues/15) |
-| Сервис на стенде и страница-чат | Сервер создаётся, но сервис на него не развёрнут; проверяющие запускают локально. [#14](https://github.com/bozzyk44/oes-agent-assistant/issues/14), [#18](https://github.com/bozzyk44/oes-agent-assistant/issues/18) |
+| Страница-чат | Для проверки задания не нужна. Стенд в облаке разворачивается одной командой — [STAND.md](docs/development/STAND.md), — проверяющие запускают локально. [#18](https://github.com/bozzyk44/oes-agent-assistant/issues/18) |
 
 Упрощения, которые в продукте сделаны бы иначе, — в DESIGN.md, раздел 7, и в ARCHITECTURE.md, раздел «Упрощения».
 
