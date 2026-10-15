@@ -737,6 +737,11 @@ def test_kpi_relative_period_is_resolved_by_code(database: Database, small: Path
         period={"relative": "today", "date_from": "2026-01-01", "date_to": "2026-01-01"},
     )
     assert both["status"] == Status.INVALID.value
+    unknown = _tool(database, "u-eng", KPI, table="production", period={"relative": "tomorrow"})
+    assert unknown["status"] == Status.INVALID.value
+    # Оборудование — текущее состояние: период не применяется и в пояснении не называется.
+    equipment = _tool(database, "u-eng", KPI, table="equipment", period={"relative": "yesterday"})
+    assert equipment["status"] == Status.OK.value and "Период" not in equipment.get("note", "")
     # Нет доступа к таблице — отказ, а не «данных нет»: точка отсчёта не раньше прав.
     hr = _tool(database, "u-hr", KPI, table="production", period={"relative": "yesterday"})
     assert hr["status"] == Status.DENIED.value

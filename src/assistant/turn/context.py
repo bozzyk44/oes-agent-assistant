@@ -8,12 +8,11 @@
 """
 
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import Connection, text
 
-from assistant.access import Grants, Period, reference_day
+from assistant.access import Grants, Period, reference_day, relative_dates
 
 TABLE_NAMES = {
     "production": "добыча (production)",
@@ -89,7 +88,7 @@ def user_info(grants: Grants, periods: dict[str, Period]) -> str:
     if today is not None:
         lines.append(
             f"Сегодня — {today.isoformat()}, последний день доступных данных;"
-            f" вчера — {(today - timedelta(days=1)).isoformat()}."
+            f" вчера — {relative_dates('yesterday', today)[0].isoformat()}."
         )
     return "\n".join(lines)
 

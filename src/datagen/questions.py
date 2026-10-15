@@ -201,6 +201,26 @@ def accessible_cells(files: Mapping[str, str], user: Mapping[str, Any], separato
     return "\n".join(parts)
 
 
+def reference_day(files: Mapping[str, str], user: Mapping[str, Any]) -> date:
+    """«Сегодня» для пользователя — тем же правилом, что у сервиса: последний день по датам
+    добычи и началу простоев на его участках (решение 19). Считается по файлам набора,
+    а не по параметрам генератора: ожидание и ответ сервиса берут один день."""
+    kpi: Mapping[str, list[str]] = user.get("kpi") or {}
+    days: list[date] = []
+    for table, column in (("production", "date"), ("downtime", "start")):
+        lines = files.get(f"{table}.csv", "").splitlines()
+        if not lines or not kpi.get(table):
+            continue
+        header = lines[0].split(",")
+        site, value = header.index("site"), header.index(column)
+        days += [
+            date.fromisoformat(cells[value][:10])
+            for cells in (line.split(",") for line in lines[1:])
+            if cells[site] in kpi[table]
+        ]
+    return max(days)
+
+
 def users_by_id(files: Mapping[str, str]) -> dict[str, dict[str, Any]]:
     return {user["user_id"]: user for user in json.loads(files["users.json"])}
 
@@ -784,7 +804,7 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
     # вчера»: ответ по каждому участку. «Вчера» — день перед последним днём данных: текущей
     # даты во входе нет, и «сегодня» — последний день, за который есть данные. Вопрос
     # в конце списка, чтобы номера прежних не сдвинулись.
-    yesterday = last - timedelta(days=1)
+    yesterday = reference_day(files, users[engineer.user_id]) - timedelta(days=1)
     plan_sites = tuple(site for site in SITES if site in engineer.kpi.get("production", ()))
     questions.append(
         Question(

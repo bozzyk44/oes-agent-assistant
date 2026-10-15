@@ -8,7 +8,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from sqlalchemy import (
@@ -187,6 +187,22 @@ class Period:
     last: date
 
 
+# Относительные периоды: дней назад от «сегодня» до первого и до последнего дня, название.
+# Одно определение для схемы инструмента, расчёта дат и сведений о пользователе.
+RELATIVE_PERIODS: dict[str, tuple[int, int, str]] = {
+    "today": (0, 0, "сегодня"),
+    "yesterday": (1, 1, "вчера"),
+    "last_7_days": (6, 0, "последние 7 дней"),
+    "last_30_days": (29, 0, "последние 30 дней"),
+}
+
+
+def relative_dates(relative: str, today: date) -> tuple[date, date]:
+    """Даты относительного периода включительно; «сегодня» — последний день данных."""
+    back_first, back_last, _ = RELATIVE_PERIODS[relative]
+    return today - timedelta(days=back_first), today - timedelta(days=back_last)
+
+
 def reference_day(periods: dict[str, Period]) -> date | None:
     """«Сегодня» для относительных дат — последний день доступных данных. Данные набора
     относятся к своему периоду: календарное «вчера» было бы днём без данных. Одна точка
@@ -197,8 +213,8 @@ def reference_day(periods: dict[str, Period]) -> date | None:
 def data_periods(connection: Connection, grants: Grants) -> dict[str, Period]:
     """Период данных в доступных пользователю строках: по датам добычи и началу простоев.
 
-    Нужен для сведений о пользователе во входе модели: вопрос «за вчера» она соотносит
-    с периодом данных, а не с текущей датой, которой во входе нет.
+    Нужен для сведений о пользователе во входе модели и для точки отсчёта относительных
+    дат — `reference_day` (решение 19).
     """
     periods: dict[str, Period] = {}
     for name, column in (("production", "date"), ("downtime", "start")):

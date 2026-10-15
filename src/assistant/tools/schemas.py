@@ -11,6 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from assistant.access import RELATIVE_PERIODS
+
 SEARCH = "search_documents"
 DOCUMENT = "get_document"
 KPI = "query_kpi"
@@ -51,18 +53,17 @@ class KpiFilter(_Args):
     value: Any
 
 
-RELATIVE_PERIODS = ("today", "yesterday", "last_7_days", "last_30_days")
-
-
 class KpiPeriod(_Args):
     # Включительно, календарные дни. Либо обе даты, либо относительный период: его даты
     # считает код от последнего дня доступных данных (решение 19).
     date_from: date | None = None
     date_to: date | None = None
-    relative: Literal["today", "yesterday", "last_7_days", "last_30_days"] | None = None
+    relative: str | None = None
 
     @model_validator(mode="after")
     def _one_way(self) -> KpiPeriod:
+        if self.relative is not None and self.relative not in RELATIVE_PERIODS:
+            raise ValueError(f"relative: одно из {', '.join(RELATIVE_PERIODS)}")
         dates = (self.date_from is not None, self.date_to is not None)
         if self.relative is not None and any(dates):
             raise ValueError("либо relative, либо date_from и date_to")

@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import Connection
 
 from assistant.access import (
+    RELATIVE_PERIODS,
     Filter,
     Grants,
     KpiQuery,
@@ -23,6 +24,7 @@ from assistant.access import (
     data_periods,
     query_rows,
     reference_day,
+    relative_dates,
 )
 from assistant.access.kpi import MAX_LIMIT
 from assistant.tools.schemas import KPI_COLUMNS, KpiArgs, KpiPeriod
@@ -63,7 +65,11 @@ def run_kpi(connection: Connection, grants: Grants, args: KpiArgs) -> KpiAnswer:
 
     resolved = ""
     relative = args.period.relative if args.period is not None else None
-    if relative is not None:
+    if relative is not None and args.table == "equipment":
+        # Оборудование — текущее состояние, период к нему не применяется: даты в пояснении
+        # выдали бы его за данные «за вчера».
+        args = args.model_copy(update={"period": None})
+    elif relative is not None:
         today = reference_day(data_periods(connection, grants))
         if today is None:
             # Доступных данных нет: отказ или пустой ответ решает слой доступа, как без
@@ -74,7 +80,7 @@ def run_kpi(connection: Connection, grants: Grants, args: KpiArgs) -> KpiAnswer:
             period = KpiPeriod(date_from=first, date_to=last)
             args = args.model_copy(update={"period": period})
             resolved = (
-                f"Период «{RELATIVE_NAMES[relative]}»: с {first.isoformat()}"
+                f"Период «{RELATIVE_PERIODS[relative][2]}»: с {first.isoformat()}"
                 f" по {last.isoformat()}; сегодня — {today.isoformat()}, последний день"
                 " доступных данных."
             )
@@ -124,26 +130,6 @@ def run_kpi(connection: Connection, grants: Grants, args: KpiArgs) -> KpiAnswer:
             answer.note += f" Показаны первые {len(rows)} строк; сузьте фильтры."
     answer.data = data
     return answer
-
-
-RELATIVE_NAMES = {
-    "today": "сегодня",
-    "yesterday": "вчера",
-    "last_7_days": "последние 7 дней",
-    "last_30_days": "последние 30 дней",
-}
-_RELATIVE_DAYS = {
-    "today": (0, 0),
-    "yesterday": (1, 1),
-    "last_7_days": (6, 0),
-    "last_30_days": (29, 0),
-}
-
-
-def relative_dates(relative: str, today: date) -> tuple[date, date]:
-    """Даты относительного периода включительно; «сегодня» — последний день данных."""
-    back_first, back_last = _RELATIVE_DAYS[relative]
-    return today - timedelta(days=back_first), today - timedelta(days=back_last)
 
 
 def _check_columns(args: KpiArgs, columns: tuple[str, ...]) -> None:
