@@ -102,6 +102,10 @@ class Question:
     attack: tuple[dict[str, Any], ...] = ()
     # Вопрос просит число до десятых: каждое число в `must_include` — с ненулевыми десятыми.
     tenths: bool = False
+    # Период задан словами вопроса, а не выбран генератором: подобрать его под ненулевые
+    # десятые нельзя. Ноль в десятых здесь безопасен — прогон сравнивает числа по значению
+    # (решение 18): «85» ответа совпадает с «85.0» ожидания, «85.04» — нет.
+    fixed_period: bool = False
 
     def record(self, formulation: int = 0, *, qid: str | None = None) -> dict[str, Any]:
         """Строка `questions.jsonl` в формате задания."""
@@ -774,6 +778,39 @@ def build_questions(world: World, files: Mapping[str, str]) -> tuple[Question, .
             ),
             "no_data",
             note="Норматива расхода топлива нет ни в одном документе",
+        )
+    )
+    # Выполнение плана без названного участка у пользователя с несколькими участками и «за
+    # вчера»: ответ по каждому участку. «Вчера» — день перед последним днём данных: текущей
+    # даты во входе нет, и «сегодня» — последний день, за который есть данные. Вопрос
+    # в конце списка, чтобы номера прежних не сдвинулись.
+    yesterday = last - timedelta(days=1)
+    plan_sites = tuple(site for site in SITES if site in engineer.kpi.get("production", ()))
+    questions.append(
+        Question(
+            "q19",
+            "kpi_and_doc",
+            engineer.user_id,
+            (
+                "Какая доля выполнения плана добычи за вчера? С точностью до десятых.",
+                "На сколько процентов вчера выполнили план по добыче? До десятых.",
+            ),
+            "answer",
+            must_include=tuple(percent_of(site, yesterday, yesterday) for site in plan_sites),
+            must_cite=(docs["plan"].doc_id,),
+            note=(
+                f"«Вчера» — {yesterday.isoformat()}, день перед последним днём данных;"
+                " по каждому участку: "
+                + "; ".join(
+                    f"{site}: факт {sum(tonnes(site, yesterday, yesterday))} т против плана"
+                    f" {world.shift_plan[site]} т на смену × {len(SHIFTS)} смены"
+                    for site in plan_sites
+                )
+            ),
+            labels=(Label(docs["plan"].doc_id, 1),),
+            basis={"sites": plan_sites, "day": yesterday},
+            tenths=True,
+            fixed_period=True,
         )
     )
     # Номера по порядку: идентификатор — место вопроса в файле.

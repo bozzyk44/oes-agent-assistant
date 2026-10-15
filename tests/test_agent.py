@@ -440,6 +440,24 @@ def test_history_is_visible_in_the_next_turn(database: Database, small: Path) ->
     assert messages[1]["content"] == first_turn
 
 
+def test_user_header_names_the_reference_day() -> None:
+    # «Сегодня» — последний день доступных данных, от него модель считает «вчера»: точку
+    # отсчёта задаёт код, а не догадка модели.
+    from datetime import date
+
+    from assistant.access import Grants, Period
+    from assistant.turn.context import user_info
+
+    grants = Grants("u", "Имя", "Должность", kpi={"production": frozenset({"S"})})
+    periods = {
+        "production": Period(date(2026, 3, 1), date(2026, 3, 14)),
+        "downtime": Period(date(2026, 3, 1), date(2026, 3, 15)),
+    }
+    header = user_info(grants, periods)
+    assert "Сегодня — 2026-03-15, последний день доступных данных; вчера — 2026-03-14." in header
+    assert "Сегодня" not in user_info(grants, {})
+
+
 def test_text_answer_and_thinking(database: Database, small: Path) -> None:
     model = ScriptedModel([reply_text("<think>прикину</think>Ответа нет в документах.")])
     service, _ = _service(database, model)

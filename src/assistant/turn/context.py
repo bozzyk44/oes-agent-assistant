@@ -8,6 +8,7 @@
 """
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import Connection, text
@@ -83,6 +84,14 @@ def user_info(grants: Grants, periods: dict[str, Period]) -> str:
         lines.append(
             f"Данные «{TABLE_NAMES.get(table, table)}» — с {period.first.isoformat()}"
             f" по {period.last.isoformat()}."
+        )
+    if periods:
+        # Точка отсчёта относительных дат — от кода, а не от догадки модели: данные набора
+        # относятся к своему периоду, и календарная дата сделала бы «вчера» днём без данных.
+        today = max(period.last for period in periods.values())
+        lines.append(
+            f"Сегодня — {today.isoformat()}, последний день доступных данных;"
+            f" вчера — {(today - timedelta(days=1)).isoformat()}."
         )
     return "\n".join(lines)
 
