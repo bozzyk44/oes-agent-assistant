@@ -310,6 +310,22 @@ def source_numbers(text: str) -> set[str]:
     return {_plain(Decimal(item)) for item in found}
 
 
+# Дата в тексте: «14.09.2026» или «2026-09-14». Иначе «14.09» читалось бы дробным числом,
+# а в источнике та же дата могла быть записана по-другому.
+_DATE = re.compile(r"(?<![\d.])\d{1,2}\.\d{1,2}\.\d{4}(?![\d.])|(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
+
+
+def unsourced_numbers(text: str, source: str) -> list[str]:
+    """Числа текста, которых нет в источнике ни целиком, ни группой цифр, — по тому же
+    правилу, что входы расчёта, без постоянных. Дата сверяется по частям: день, месяц, год."""
+    known = source_numbers(normalize_digits(source))
+    prepared = normalize_digits(text)
+    parts = [part for date in _DATE.findall(prepared) for part in _DIGITS.findall(date)]
+    numbers = NUMBER.findall(_DATE.sub(" ", prepared))
+    found = dict.fromkeys(_plain(Decimal(item)) for item in [*parts, *numbers])
+    return [item for item in found if item not in known]
+
+
 def _unsourced(args: CalculateArgs, sources: set[str]) -> list[str]:
     """Входы расчёта, которых нет ни в результатах инструментов хода, ни в сообщении
     пользователя. Числа сравниваются после той же нормализации, что у прогона: «2852.5»

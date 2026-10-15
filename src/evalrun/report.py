@@ -301,6 +301,10 @@ def _diagnostics(attempts: list[dict[str, Any]]) -> list[str]:
     return out + _table(
         [
             ("Код заменил outcome модели, ходов", _share(_sum(diags, "outcome_replaced"), turns)),
+            (
+                "Код заменил текст отказа с числом без опоры, ходов",
+                _share(_sum(diags, "refusal_replaced"), turns),
+            ),
             ("Отброшено цитат как не бывших во входе", str(_sum(diags, "dropped_citations"))),
             ("Ходов, остановленных бюджетом", _share(_sum(diags, "budget_stop"), turns)),
             ("Вызовов инструментов не по схеме", _share(_sum(diags, "invalid_calls"), tool_calls)),

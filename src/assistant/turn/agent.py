@@ -36,7 +36,7 @@ from assistant.model import (
     ModelReply,
     TransientModelError,
 )
-from assistant.tools.box import ToolBox, ToolResult, envelope
+from assistant.tools.box import ToolBox, ToolResult, envelope, unsourced_numbers
 from assistant.tools.schemas import ARGUMENTS
 from assistant.turn.calls import CALL_IN_TEXT, CALL_IN_TEXT_NOTE, NOT_EXECUTED, plan_calls
 from assistant.turn.context import (
@@ -89,6 +89,8 @@ DROPPED = json.dumps(
 REPEATED = "Результат этого вызова с теми же аргументами уже есть выше; повтор не выполнен."
 EMPTY_ANSWER = "Не удалось получить ответ модели."
 BUDGET_ANSWER = "Ход остановлен на лимите бюджета модели, ответа нет."
+# Отказ, в тексте которого число без опоры во входе хода: число выдумано, текст заменяется.
+REFUSAL_ANSWER = "Не могу ответить: эти данные вам недоступны."
 
 
 @dataclass
@@ -122,6 +124,18 @@ class _State:
             *build_messages(self.info, history, self.actions, self.question),
             *self.turn,
         ]
+
+    def sources(self) -> str:
+        """Всё, что модель могла видеть в этом ходе, кроме системной части: сведения
+        о пользователе, история, сообщение и результаты всех выполненных вызовов, включая
+        убранные из входа ради бюджета."""
+        results = [
+            str(item.get("result", ""))
+            for call in self.record["calls"]
+            for item in call.get("tool_calls", [])
+        ]
+        texts = [item.text for item in self.history]
+        return "\n".join([self.info, self.actions, self.question, *texts, *results])
 
     def seen_chunks(self) -> set[str]:
         """Фрагменты, бывшие во входе: результаты этого хода и вошедшая история."""
@@ -543,16 +557,25 @@ class AgentHandler:
         state.record["outcome_row"] = verdict.row
         if parsed.outcome != verdict.outcome:
             state.record["outcome_replaced"] = {"proposed": parsed.outcome, "set": verdict.outcome}
+        answer = parsed.answer
+        if verdict.outcome == "refusal":
+            # Отказ не сообщает чисел, которых модель не видела: после `denied` модель
+            # называла выдуманное значение (EVAL.md, провал 6). Закрытого значения во входе
+            # нет, так что выдуманное число не утечка, но и не ответ.
+            unsourced = unsourced_numbers(answer, state.sources())
+            if unsourced:
+                state.record["refusal_unsourced"] = unsourced
+                answer = REFUSAL_ANSWER
         citations = tuple(CitationRef(chunk.split("#", 1)[0], chunk) for chunk in accepted)
         return TurnResult(
             outcome=verdict.outcome,
-            answer=parsed.answer,
+            answer=answer,
             prefix_hash=self.prefix_hash,
             citations=citations,
             record=state.record,
             messages=(
                 StoredMessage("user", {"text": context.message}),
-                StoredMessage("assistant", {"text": parsed.answer}, tuple(accepted)),
+                StoredMessage("assistant", {"text": answer}, tuple(accepted)),
             ),
         )
 
