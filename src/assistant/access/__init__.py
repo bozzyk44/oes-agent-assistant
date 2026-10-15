@@ -21,6 +21,7 @@ from assistant.access.kpi import (
     Period,
     data_periods,
     query_rows,
+    reference_day,
 )
 from assistant.access.overview import Overview, overview
 from assistant.access.repair import RepairCheck, check_repair
@@ -44,5 +45,6 @@ __all__ = [
     "load_grants",
     "overview",
     "query_rows",
+    "reference_day",
     "search",
 ]

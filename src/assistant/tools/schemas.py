@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SEARCH = "search_documents"
 DOCUMENT = "get_document"
@@ -51,10 +51,24 @@ class KpiFilter(_Args):
     value: Any
 
 
+RELATIVE_PERIODS = ("today", "yesterday", "last_7_days", "last_30_days")
+
+
 class KpiPeriod(_Args):
-    # Включительно, календарные дни.
-    date_from: date
-    date_to: date
+    # Включительно, календарные дни. Либо обе даты, либо относительный период: его даты
+    # считает код от последнего дня доступных данных (решение 19).
+    date_from: date | None = None
+    date_to: date | None = None
+    relative: Literal["today", "yesterday", "last_7_days", "last_30_days"] | None = None
+
+    @model_validator(mode="after")
+    def _one_way(self) -> KpiPeriod:
+        dates = (self.date_from is not None, self.date_to is not None)
+        if self.relative is not None and any(dates):
+            raise ValueError("либо relative, либо date_from и date_to")
+        if self.relative is None and not all(dates):
+            raise ValueError("нужны date_from и date_to или relative")
+        return self
 
 
 class KpiAggregate(_Args):
@@ -157,11 +171,19 @@ TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
                 "filters": {"type": "array", "items": _FILTER},
                 "period": {
                     "type": "object",
+                    "description": (
+                        "Либо date_from и date_to, либо relative — его даты посчитает"
+                        " инструмент от последнего дня данных и назовёт в пояснении"
+                    ),
                     "properties": {
                         "date_from": {"type": "string", "description": "YYYY-MM-DD"},
                         "date_to": {"type": "string", "description": "YYYY-MM-DD, включительно"},
+                        "relative": {
+                            "type": "string",
+                            "enum": list(RELATIVE_PERIODS),
+                            "description": "Сегодня, вчера, последние 7 или 30 дней",
+                        },
                     },
-                    "required": ["date_from", "date_to"],
                     "additionalProperties": False,
                 },
                 "group_by": {

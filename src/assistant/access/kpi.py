@@ -187,6 +187,13 @@ class Period:
     last: date
 
 
+def reference_day(periods: dict[str, Period]) -> date | None:
+    """«Сегодня» для относительных дат — последний день доступных данных. Данные набора
+    относятся к своему периоду: календарное «вчера» было бы днём без данных. Одна точка
+    отсчёта для сведений о пользователе и для периода запроса к КХД (решение 19)."""
+    return max((period.last for period in periods.values()), default=None)
+
+
 def data_periods(connection: Connection, grants: Grants) -> dict[str, Period]:
     """Период данных в доступных пользователю строках: по датам добычи и началу простоев.
 

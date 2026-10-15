@@ -705,6 +705,43 @@ def test_kpi_derived_columns_and_average(database: Database, small: Path) -> Non
     assert values == {"K1": {"avg_tonnes": 105, "count": 2}, "K2": {"avg_tonnes": 210, "count": 3}}
 
 
+def test_kpi_relative_period_is_resolved_by_code(database: Database, small: Path) -> None:
+    # «Вчера» считает код от последнего дня доступных данных и называет даты в пояснении.
+    relative = _tool(
+        database,
+        "u-eng",
+        KPI,
+        table="production",
+        period={"relative": "yesterday"},
+        group_by=["site"],
+        aggregates=[{"function": "sum", "column": "tonnes"}, {"function": "count"}],
+    )
+    explicit = _tool(
+        database,
+        "u-eng",
+        KPI,
+        table="production",
+        period={"date_from": "2026-01-01", "date_to": "2026-01-01"},
+        group_by=["site"],
+        aggregates=[{"function": "sum", "column": "tonnes"}, {"function": "count"}],
+    )
+    assert relative["data"] == explicit["data"]
+    assert "с 2026-01-01 по 2026-01-01; сегодня — 2026-01-02" in relative["note"]
+    week = _tool(database, "u-eng", KPI, table="production", period={"relative": "last_7_days"})
+    assert "с 2025-12-27 по 2026-01-02" in week["note"]
+    both = _tool(
+        database,
+        "u-eng",
+        KPI,
+        table="production",
+        period={"relative": "today", "date_from": "2026-01-01", "date_to": "2026-01-01"},
+    )
+    assert both["status"] == Status.INVALID.value
+    # Нет доступа к таблице — отказ, а не «данных нет»: точка отсчёта не раньше прав.
+    hr = _tool(database, "u-hr", KPI, table="production", period={"relative": "yesterday"})
+    assert hr["status"] == Status.DENIED.value
+
+
 def test_kpi_empty_and_invalid(database: Database, small: Path) -> None:
     empty = _tool(
         database,

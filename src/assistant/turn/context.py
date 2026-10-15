@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
-from assistant.access import Grants, Period
+from assistant.access import Grants, Period, reference_day
 
 TABLE_NAMES = {
     "production": "добыча (production)",
@@ -85,10 +85,8 @@ def user_info(grants: Grants, periods: dict[str, Period]) -> str:
             f"Данные «{TABLE_NAMES.get(table, table)}» — с {period.first.isoformat()}"
             f" по {period.last.isoformat()}."
         )
-    if periods:
-        # Точка отсчёта относительных дат — от кода, а не от догадки модели: данные набора
-        # относятся к своему периоду, и календарная дата сделала бы «вчера» днём без данных.
-        today = max(period.last for period in periods.values())
+    today = reference_day(periods)
+    if today is not None:
         lines.append(
             f"Сегодня — {today.isoformat()}, последний день доступных данных;"
             f" вчера — {(today - timedelta(days=1)).isoformat()}."
