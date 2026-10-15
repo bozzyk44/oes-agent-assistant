@@ -73,7 +73,12 @@ wait_ready() {
         sleep 5
     done
     echo "stand: жду окончания первой настройки сервера"
-    remote cloud-init status --wait >/dev/null || die "первая настройка сервера не удалась: cloud-init status --long на сервере"
+    # Код 2 — настройка закончена с некритичными предупреждениями (degraded done): у образов
+    # панели это обычное дело. Провал — только код 1.
+    local status=0
+    remote cloud-init status --wait >/dev/null || status=$?
+    [[ "$status" == 0 || "$status" == 2 ]] \
+        || die "первая настройка сервера не удалась: cloud-init status --long на сервере"
 }
 
 # Тот же cloud-init, что Terraform передаёт серверу, без комментариев и пустых строк: форма
