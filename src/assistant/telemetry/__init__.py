@@ -48,9 +48,10 @@ turns = _meter.create_counter("assistant.turns", unit="{turn}", description="Х�
 
 log = logging.getLogger(__name__)
 _enabled = False
-# Свои сообщения экспортёров — только в обычный журнал: иначе отказ приёмника порождал бы
+# В приёмник — только журнал сервиса. Сообщения сторонних библиотек могут нести параметры
+# запросов и тела ответов, а сообщения экспортёров при отказе приёмника порождали бы
 # записи об отказе, которые снова уходят в тот же приёмник.
-_LOCAL_ONLY = ("opentelemetry", "urllib3")
+_EXPORTED = ("assistant", "toir_stub")
 
 
 def setup(environ: Mapping[str, str]) -> bool:
@@ -105,7 +106,7 @@ class _TextlessHandler(LoggingHandler):
     стабильным, ради одного обработчика зависимость не добавляется."""
 
     def emit(self, record: logging.LogRecord) -> None:
-        if record.name.startswith(_LOCAL_ONLY):
+        if not record.name.startswith(_EXPORTED):
             return
         if record.exc_info or record.stack_info:
             copy = logging.makeLogRecord(record.__dict__)

@@ -37,6 +37,7 @@ from assistant.model import (
     TransientModelError,
 )
 from assistant.tools.box import ToolBox, ToolResult, envelope
+from assistant.tools.schemas import ARGUMENTS
 from assistant.turn.calls import CALL_IN_TEXT, CALL_IN_TEXT_NOTE, NOT_EXECUTED, plan_calls
 from assistant.turn.context import (
     HistoryMessage,
@@ -447,12 +448,15 @@ class AgentHandler:
                     {"name": call.name, "arguments": call.arguments, "repeated": True}
                 )
                 continue
+            # Имя и идентификатор вызова пишет модель: в телеметрию — только известное имя и
+            # короткий идентификатор, чтобы текст модели не попал в приёмник.
+            tool_name = call.name if call.name in ARGUMENTS else "unknown"
             with telemetry.span(
-                f"execute_tool {call.name}",
+                f"execute_tool {tool_name}",
                 {
                     "gen_ai.operation.name": "execute_tool",
-                    "gen_ai.tool.name": call.name,
-                    "gen_ai.tool.call.id": call.call_id,
+                    "gen_ai.tool.name": tool_name,
+                    "gen_ai.tool.call.id": call.call_id[:64],
                 },
             ) as current:
                 result = box.run(call.name, call.arguments)

@@ -197,3 +197,113 @@ def test_log_records_leave_without_exception_text() -> None:
     assert "вопрос пользователя" not in dump
     # Обычный журнал процесса трассировку сохраняет: запись не изменена.
     assert record.exc_info is not None
+
+
+def _status(item: ReadableSpan) -> str:
+    return item.status.status_code.name
+
+
+def test_expected_outcomes_do_not_mark_spans_as_errors(
+    database: Database,
+    small: Path,
+    toir: Toir,  # noqa: F811 — фикстура из test_actions
+    spans: InMemorySpanExporter,
+) -> None:
+    from datetime import timedelta
+    from uuid import uuid4
+
+    from assistant.db.session import transaction
+    from assistant.model import FormatRejected
+    from assistant.turn.capture import capture
+
+    # Сессия занята — 409, но это не сбой.
+    service = make_service(database.service, database.service_url)
+    session = new_session()
+    lease = timedelta(seconds=service.runtime.settings.session_lease_seconds)
+    with transaction(database.service, "u-eng") as connection:
+        assert capture(connection, "u-eng", session, uuid4(), service.clock.now, lease)
+    assert service.turn("u-eng", session).status == 409
+    # Неизвестное действие — 404.
+    actions = action_service(database, toir)
+    assert _confirm(actions, "a-unknown").status_code == 404
+    # Сервер отверг строгий формат — запрос повторён без него.
+    _turn(database, ScriptedModel([FormatRejected("response_format"), final("ок")]))
+    finished = spans.get_finished_spans()
+    (busy,) = [
+        i for i in _named(finished, "turn") if (i.attributes or {}).get("session.id") == session
+    ]
+    (confirm,) = _named(finished, "action confirm")
+    rejected = [
+        i
+        for i in _named(finished, "chat test-model")
+        if (i.attributes or {}).get("assistant.exception") == "FormatRejected"
+    ]
+    assert (busy.attributes or {})["assistant.exception"] == "SessionBusy"
+    assert (confirm.attributes or {})["assistant.exception"] == "NotFound"
+    assert len(rejected) == 1
+    assert {_status(busy), _status(confirm), _status(rejected[0])} == {"UNSET"}
+
+
+def test_unhandled_error_text_stays_out_of_every_span(
+    database: Database,
+    small: Path,
+    toir: Toir,  # noqa: F811 — фикстура из test_actions
+    spans: InMemorySpanExporter,
+) -> None:
+    # Запись результата падает с текстом, похожим на параметры запроса к базе: ответ — 500,
+    # а текст не попадает ни в атрибуты, ни в события, ни в статус спанов — включая спан
+    # запроса, который пишет сам FastAPI.
+    marker = "параметры запроса: вопрос пользователя 77"
+
+    def broken_store(*_: object) -> None:
+        raise RuntimeError(marker)
+
+    service = action_service(database, toir, store=broken_store)
+    assert _confirm(service, _propose(service)).status_code >= 500
+    finished = spans.get_finished_spans()
+    assert _named(finished, "action confirm")
+    dump = json.dumps(
+        [
+            {
+                "name": item.name,
+                "attributes": dict(item.attributes or {}),
+                "status": item.status.description,
+                "events": [
+                    {"name": event.name, "attributes": dict(event.attributes or {})}
+                    for event in item.events
+                ],
+            }
+            for item in finished
+        ],
+        ensure_ascii=False,
+        default=str,
+    )
+    assert marker not in dump
+
+
+def test_setup_with_endpoint_adds_one_log_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    import logging
+
+    # Экспортёры на несуществующий адрес: короткий предел, чтобы остановка не ждала повторов.
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "0.2")
+
+    from opentelemetry import _logs, metrics
+
+    root = logging.getLogger()
+    before = list(root.handlers)
+    environ = {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:9"}
+    try:
+        assert telemetry.setup(environ) is True
+        assert telemetry.setup(environ) is True
+        added = [handler for handler in root.handlers if handler not in before]
+        assert [type(handler).__name__ for handler in added] == ["_TextlessHandler"]
+    finally:
+        for handler in root.handlers[:]:
+            if handler not in before:
+                root.removeHandler(handler)
+        # Экспортёры на несуществующий адрес не должны пережить тест.
+        for provider in (metrics.get_meter_provider(), _logs.get_logger_provider()):
+            shutdown = getattr(provider, "shutdown", None)
+            if shutdown is not None:
+                shutdown()
+        telemetry._enabled = False
