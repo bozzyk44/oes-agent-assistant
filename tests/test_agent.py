@@ -489,7 +489,11 @@ def test_refusal_leans_on_user_info_and_earlier_user_messages(
     # «7» — только из прошлой реплики пользователя; 2 и 1 из даты — только из сведений
     # о пользователе: последний день его данных.
     assert reply.body["answer"] == "Смена 7 — не ваша; данные у вас только по 02.01.2026"
-    model.steps = [tools(_downtime_k2()), final("Смена 8 — не ваша", "refusal")]
+    # Тот же отказ в новой сессии: «7» уже не из чего взять.
+    model.steps = [
+        tools(_downtime_k2()),
+        final("Смена 7 — не ваша; данные у вас только по 02.01.2026", "refusal"),
+    ]
     reply = service.turn("u-k1", new_session(), "Сколько простоя у соседей?")
     assert reply.body["answer"] == REFUSAL_ANSWER
 
