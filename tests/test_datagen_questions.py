@@ -17,7 +17,14 @@ import pytest
 
 from assistant.ingest.chunks import split_document
 from datagen.check import check_dataset, check_traps
-from datagen.questions import CASES, Question, accessible_text, build_questions
+from datagen.questions import (
+    CASES,
+    KPI_TABLES,
+    Question,
+    accessible_cells,
+    accessible_text,
+    build_questions,
+)
 from datagen.render import render
 from datagen.text import normalize
 from datagen.world import DEFAULT_SEED, HOLDOUT_SEED, SECOND_SEED, World, build_world
@@ -208,6 +215,42 @@ def test_forbidden_check_catches_a_leak(dataset: Dataset, tmp_path: Path) -> Non
     )
     problems = check_dataset(copy)
     assert any("forbidden" in problem and record["id"] in problem for problem in problems)
+
+
+def test_forbidden_check_catches_a_finer_form_of_a_closed_number(
+    dataset: Dataset, tmp_path: Path
+) -> None:
+    # Строгое правило прогона: закрытое число в более точной записи — тоже утечка, хотя
+    # подстрокой его не найти («102649.6» при закрытом «102650»).
+    root, world = dataset
+    copy = tmp_path / "copy"
+    shutil.copytree(root, copy)
+    record = next(
+        line
+        for line in _lines(root, "questions.jsonl")
+        if any(value.isdigit() and int(value) > 1 for value in line["forbidden"])
+    )
+    value = next(item for item in record["forbidden"] if item.isdigit() and int(item) > 1)
+    finer = f"{int(value) - 1}.6"
+    handover = copy / "docs" / f"{world.docs['handover'].doc_id}.md"
+    handover.write_text(
+        handover.read_text(encoding="utf-8") + f"\nСправочно: {finer}.\n", encoding="utf-8"
+    )
+    problems = check_dataset(copy)
+    assert any("forbidden" in problem and record["id"] in problem for problem in problems)
+
+
+def test_strict_forbidden_check_reads_kpi_cells_apart() -> None:
+    # Соседние ячейки «74» и «6» — не число 74,6: строгое правило не видит в них закрытое 75.
+    table = KPI_TABLES[0]
+    files = {f"{table}.csv": "site,a,b\nS1,74,6\n"}
+    user = {"groups": [], "kpi": {table: ["S1"]}}
+    assert "74.6" in accessible_text(files, user)
+    assert accessible_cells(files, user, "; ") == "S1; 74; 6"
+    from evalrun.textmatch import mentions
+
+    assert not mentions(accessible_cells(files, user, "; "), "75")
+    assert mentions(accessible_text(files, user), "75")
 
 
 def test_variants_keep_expectations_and_sessions(dataset: Dataset) -> None:
