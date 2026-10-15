@@ -396,10 +396,14 @@ request = u.Request(os.environ['TOIR_URL'] + '/requests',
                     headers={'Authorization': 'Bearer ' + os.environ['TOIR_TOKEN']})
 with u.urlopen(request, timeout=5) as reply:
     rows = json.load(reply)
-if sum(1 for row in rows if row.get('equipment_id') == equipment) != 1:
-    sys.exit('в заглушке ТОиР не ровно одна заявка на это оборудование')
+mine = [row for row in rows if row.get('equipment_id') == equipment]
+if len(mine) != 1 or mine[0].get('request_id') != first[1]['request_id']:
+    sys.exit('в заглушке ТОиР не ровно одна заявка на это оборудование или не та, что в ответе')
 " "$action_id" "$repair_user" "$repair_equipment" \
     || fail "подтверждение заявки не по контракту"
+# Сервис — снова с адресом модели из окружения, заглушка модели остановлена: следующий шаг
+# перезапускает контейнер, а не пересоздаёт его из-за смены настроек.
+$COMPOSE up --detach --wait --remove-orphans
 
 step "перезапуск сервиса"
 $COMPOSE restart assistant >/dev/null

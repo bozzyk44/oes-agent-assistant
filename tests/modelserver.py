@@ -13,27 +13,24 @@
 не знает; данных набора — тоже: шаги приходят снаружи.
 """
 
-import os
 from collections.abc import Mapping
-from typing import Any, Protocol
+from typing import Any
 
-from assistant.model import ChatRequest, ModelReply
+from assistant.model import ChatRequest, ModelClient
 from tests.modelstub import ScriptedModel, Step, call, final, tools
 
 PORT = 8003
 
 
-class Model(Protocol):
-    def complete(self, request: ChatRequest) -> ModelReply: ...
-
-
-def openai_reply(model: Model, body: Mapping[str, Any]) -> dict[str, Any]:
+def openai_reply(model: ModelClient, body: Mapping[str, Any]) -> dict[str, Any]:
     """Ответ сервера в формате OpenAI на запрос в том же формате."""
     reply = model.complete(
         ChatRequest(
             messages=tuple(body.get("messages") or ()),
             tools=tuple(body.get("tools") or ()),
+            # Клиент сервиса не передаёт поле только на запасном пути — это `None`.
             tool_choice=body.get("tool_choice"),
+            response_format=body.get("response_format"),
         )
     )
     message: dict[str, Any] = {"role": "assistant", "content": reply.content}
@@ -78,7 +75,7 @@ def scripted_steps(raw: list[Mapping[str, Any]]) -> list[Step]:
     return steps
 
 
-def http_app(model: Model) -> Any:
+def http_app(model: ModelClient) -> Any:
     from fastapi import FastAPI, HTTPException, Request
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -114,8 +111,7 @@ def http_app(model: Model) -> Any:
 def main() -> int:
     import uvicorn
 
-    port = int(os.environ.get("MODEL_STUB_PORT", PORT))
-    uvicorn.run(http_app(ScriptedModel([])), host="0.0.0.0", port=port)  # noqa: S104 — сеть compose
+    uvicorn.run(http_app(ScriptedModel([])), host="0.0.0.0", port=PORT)  # noqa: S104 — сеть compose
     return 0
 
 
