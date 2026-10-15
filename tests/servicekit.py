@@ -107,9 +107,11 @@ def make_service(
     raise_server_exceptions: bool = True,
     toir: Transport | None = None,
     store: StoreResult = store_result,
+    config: Settings | None = None,
 ) -> Service:
     clock = Clock()
-    config = settings(database_url, model=model)
+    if config is None:
+        config = settings(database_url, model=model)
     runtime = Runtime(
         settings=config,
         engine=engine,

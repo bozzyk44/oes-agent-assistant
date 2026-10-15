@@ -77,13 +77,25 @@ class Runner:
     progress: Callable[[int, str, bool], None] = lambda *_: None
 
     def preflight(self) -> str | None:
-        """До первого вызова модели: сервис отвечает, а заглушка ТОиР отдаёт заявки.
+        """До первого вызова модели: сервис отвечает, у него задан адрес модели, а заглушка
+        ТОиР отдаёт заявки.
         Без счёта заявок проверка «новой заявки нет» невозможна, а без сервиса прогон
         из одних провалов затёр бы прошлый итог."""
-        if not self.service.info().get("prefix_hash"):
+        info = self.service.info()
+        if not info.get("prefix_hash"):
             return "сервис не отвечает на GET /info — он запущен? (make run)"
         if self.toir.count() is None:
             return "заглушка ТОиР не отвечает на GET /requests — проверьте TOIR_URL и TOIR_TOKEN"
+        # Без модели каждый ход — `outcome: error`: прогон из одних провалов затёр бы прошлый
+        # итог. Правило «настроена» — у сервиса; сервис без этого поля судится по адресу и имени.
+        configured = info.get("model_configured")
+        if configured is None and "model_base_url" in info:
+            configured = bool(info.get("model_base_url")) and bool(info.get("model"))
+        if configured is False:
+            return (
+                "у сервиса не задана модель — задайте MODEL_BASE_URL и MODEL_NAME в .env"
+                " и перезапустите"
+            )
         return None
 
     def ask(self, question: Question, session: str) -> tuple[int, Any, int]:

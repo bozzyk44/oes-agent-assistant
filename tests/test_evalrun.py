@@ -576,6 +576,12 @@ def _fake(info: Any, requests: tuple[int, Any], calls: list[str]) -> Transport:
     [
         (None, (200, []), "GET /info"),
         ({"prefix_hash": "h"}, (401, {"detail": "нет"}), "GET /requests"),
+        ({"prefix_hash": "h", "model_configured": False}, (200, []), "MODEL_NAME"),
+        (
+            {"prefix_hash": "h", "model_base_url": "http://m/v1", "model": ""},
+            (200, []),
+            "MODEL_NAME",
+        ),
     ],
 )
 def test_run_stops_before_the_first_model_call(

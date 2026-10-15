@@ -3,6 +3,7 @@
 """
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -118,6 +119,27 @@ def test_foreign_site_rows_never_reach_model_input(database: Database, small: Pa
     assert all(row["site"] == "K1" for row in rows["data"]["rows"])
     # Отказ по чужому и данные по своему: строка 4 — предложенный ответ остаётся ответом.
     assert reply.body["outcome"] == "answer"
+
+
+def test_get_routes_carry_no_secret(database: Database, small: Path) -> None:
+    # Ключ модели — и в учётных данных адреса, и в параметре запроса: адрес отдаёт `/info`.
+    base = settings(database.service_url, model=True)
+    url = f"http://user:{MODEL_KEY}@model.invalid/v1?key={MODEL_KEY}"
+    config = replace(base, model=replace(base.model, base_url=url))
+    model = ScriptedModel([tools(call(SEARCH, query="ремонт")), final("Ок", "answer")])
+    handler = AgentHandler(database.service, model, config.model)
+    service = make_service(database.service, database.service_url, handler, config=config)
+    turn_id = service.turn("u-eng", new_session(), "Периодичность ремонта?").body["turn_id"]
+    headers = {"X-User-ID": "u-eng"}
+    responses = [
+        service.client.get(path, headers=headers)
+        for path in ("/info", f"/turns/{turn_id}", "/overview", "/users")
+    ]
+    # Тело ошибки секрета не содержит: проверка имеет смысл только на настоящих ответах.
+    assert [response.status_code for response in responses] == [200] * 4
+    texts = [response.text for response in responses]
+    assert all(MODEL_KEY not in text and TOIR_TOKEN not in text for text in texts)
+    assert "model.invalid/v1" in texts[0]
 
 
 def test_secret_never_reaches_model_input(database: Database, small: Path) -> None:
@@ -619,7 +641,7 @@ def test_info(database: Database, small: Path) -> None:
     service, _ = _service(database, model)
     info = service.client.get("/info").json()
     assert info["prefix_hash"] == PREFIX.hash
-    assert info["model"] == "test-model"
+    assert info["model"] == "test-model" and info["model_configured"] is True
     assert info["dataset_hash"]
 
 
@@ -734,6 +756,38 @@ def test_calculate_reads_expression_numbers_as_evaluated(
         operation="expression",
         expression=expression,
     )
+    assert result["status"] == "invalid"
+
+
+@pytest.mark.parametrize(
+    ("site", "reason", "status"), [("K2", "ремонт", "denied"), ("K1", "нет такой", "empty")]
+)
+def test_calculate_does_not_lean_on_denied_or_empty_results(
+    database: Database, small: Path, site: str, reason: str, status: str
+) -> None:
+    # Даты периода, посчитанные кодом, есть в пояснении и к `denied`, и к `empty`; данных
+    # за ними нет, и опорой расчёта такой результат не служит.
+    kpi = call(
+        KPI,
+        table="downtime",
+        filters=[
+            {"column": "site", "op": "eq", "value": site},
+            {"column": "reason", "op": "eq", "value": reason},
+        ],
+        period={"relative": "last_7_days"},
+    )
+    model = ScriptedModel(
+        [
+            tools(kpi),
+            tools(call(CALCULATE, operation="expression", expression="27 / 12")),
+            final("ок"),
+        ]
+    )
+    service, _ = _service(database, model)
+    service.turn("u-k1", new_session(), "Посчитай простой соседей")
+    (kpi_result,) = _results(model, KPI)
+    assert kpi_result["status"] == status and "2025-12-27" in kpi_result["note"]
+    (result,) = _results(model, CALCULATE)
     assert result["status"] == "invalid"
 
 
