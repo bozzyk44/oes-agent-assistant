@@ -23,6 +23,7 @@ from assistant.access import (
     check_repair,
     get_document,
     load_grants,
+    overview,
     query_rows,
     search,
 )
@@ -463,3 +464,52 @@ def test_unknown_user_has_no_grants(database: Database, small: Path) -> None:
     with database.service.begin() as connection:
         bind_user(connection, "u-nobody")
         assert load_grants(connection, "u-nobody") is None
+
+
+# --- Обзор для страницы: те же права, что у инструментов ---------------------------------
+
+
+def _active_documents_of(database: Database, groups: list[str]) -> list[str]:
+    """Ожидание — своим запросом под владельцем, мимо кода обзора."""
+    with database.owner.connect() as connection:
+        return [
+            row[0]
+            for row in connection.execute(
+                text(
+                    "select distinct doc_id from kb.chunks"
+                    " where status = 'active' and acl && cast(:groups as text[]) order by doc_id"
+                ),
+                {"groups": groups},
+            )
+        ]
+
+
+@pytest.mark.parametrize("user", ["u-eng", "u-k1", "u-hr", "u-fin"])
+def test_overview_lists_only_active_documents_of_user_groups(
+    connect: Barrier, database: Database, user: str
+) -> None:
+    # На барьере «код» построчной защиты нет: условие по группам держит только запрос.
+    with _open(connect, user) as (connection, grants):
+        found = overview(connection, grants)
+    assert [doc["doc_id"] for doc in found.documents] == _active_documents_of(
+        database, grants.doc_groups
+    )
+
+
+def test_overview_equipment_needs_both_repair_and_equipment_rights(connect: Barrier) -> None:
+    from dataclasses import replace
+
+    with _open(connect, "u-eng") as (connection, grants):
+        # Заявки на K1, данные об оборудовании только по K2 — пересечения нет.
+        apart = replace(
+            grants, repair_sites=frozenset({"K1"}), kpi={"equipment": frozenset({"K2"})}
+        )
+        assert overview(connection, apart).equipment == []
+        # Заявки на оба участка, данные только по K2 — оборудование только с K2.
+        partial = replace(
+            grants, repair_sites=frozenset({"K1", "K2"}), kpi={"equipment": frozenset({"K2"})}
+        )
+        sites = {item["site"] for item in overview(connection, partial).equipment}
+        assert sites == {"K2"}
+        # Своих прав хватает на оба участка.
+        assert {item["site"] for item in overview(connection, grants).equipment} == {"K1", "K2"}
