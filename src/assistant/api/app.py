@@ -65,7 +65,7 @@ _TURN_RECORD = text(
 _DATASET = text("select content_hash from app.dataset_version")
 _USERS = text("select user_id, name, position_title from app.users order by user_id")
 # Страница для демонстрации: один файл без сборки, логики прав в нём нет.
-_PAGE = Path(__file__).with_name("page.html")
+_PAGE_FILE = Path(__file__).with_name("page.html")
 _READY = text(
     "select (select version_num from public.alembic_version),"
     " (select count(*) from app.dataset_version)"
@@ -130,8 +130,10 @@ def build_app(
     # Секрет ТОиР уходит только в модуль действий: ходу и модели его не передают.
     transport = toir_transport or http_transport(runtime.settings.toir_url)
     actions = Actions(engine, ToirClient(transport, toir_secret.token), store)
-    # Последняя версия схемы постоянна на всю жизнь процесса: читается один раз.
+    # Последняя версия схемы постоянна на всю жизнь процесса: читается один раз. Страница
+    # тоже: без файла сервис не стартует, а не отвечает 500 на первом открытии.
     schema_head = head_revision()
+    page_html = _PAGE_FILE.read_text(encoding="utf-8")
 
     def authenticate(x_user_id: str | None) -> str:
         """Одна проверка пользователя на все маршруты. Заголовок объявлен необязательным
@@ -215,7 +217,7 @@ def build_app(
     @app.get("/", response_class=HTMLResponse)
     def page() -> HTMLResponse:
         """Чат для демонстрации. Всё, что он показывает, приходит из маршрутов ниже."""
-        return HTMLResponse(_PAGE.read_text(encoding="utf-8"))
+        return HTMLResponse(page_html)
 
     @app.get("/users")
     def users() -> JSONResponse:

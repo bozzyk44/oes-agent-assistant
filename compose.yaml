@@ -163,13 +163,15 @@ services:
       PROXY_PASSWORD: ${PROXY_PASSWORD:-}
     # Хэш пароля считается при старте: в .env лежит сам пароль, а хэш с символами «$»
     # сломал бы подстановку переменных compose. Из окружения процесса Caddy пароль затем
-    # убирается; в настройках контейнера он остаётся, как и остальные секреты сервиса.
+    # убирается; в настройках контейнера он остаётся, как и остальные секреты сервиса. В
+    # хэширование пароль идёт через stdin встроенной командой оболочки: в аргументах процесса
+    # он виден был бы всем на хосте.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
         test -n "$$STAND_DOMAIN" && test -n "$$PROXY_PASSWORD"
         || { echo "proxy: нужны STAND_DOMAIN и PROXY_PASSWORD" >&2; exit 1; };
-        PROXY_PASSWORD_HASH="$$(caddy hash-password --plaintext "$$PROXY_PASSWORD")" || exit 1;
+        PROXY_PASSWORD_HASH="$$(printf '%s\n' "$$PROXY_PASSWORD" | caddy hash-password)" || exit 1;
         export PROXY_PASSWORD_HASH; unset PROXY_PASSWORD;
         exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     volumes:

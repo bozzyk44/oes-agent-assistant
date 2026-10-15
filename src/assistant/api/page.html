@@ -60,7 +60,7 @@
   <div id="log"></div>
   <form id="ask">
     <textarea id="message" placeholder="Вопрос или просьба оформить заявку" required></textarea>
-    <button class="primary" id="send">Отправить</button>
+    <button class="primary" id="send" disabled>Отправить</button>
   </form>
 </main>
 <script>
@@ -114,7 +114,15 @@ function renderAction(box, pending) {
   const decide = async (verb) => {
     // Кнопки гаснут сразу; повтор и без этого не создаёт вторую заявку — это делает сервис.
     confirm.disabled = reject.disabled = true;
-    const { status: code, data } = await api("POST", `/actions/${pending.action_id}/${verb}`);
+    let code, data;
+    try {
+      ({ status: code, data } = await api("POST", `/actions/${pending.action_id}/${verb}`));
+    } catch (error) {
+      // Сеть оборвалась — повтор безопасен: сервис доведёт то же действие, второй заявки нет.
+      status.textContent = `Сервис недоступен: ${error}`;
+      confirm.disabled = reject.disabled = false;
+      return;
+    }
     if (code === 200 && data && data.status === "done") {
       status.textContent = `Заявка создана: ${data.request_id}`;
     } else if (code === 200 && data && data.status === "rejected") {
@@ -146,9 +154,18 @@ function renderTurn(data) {
   record.addEventListener("toggle", async () => {
     if (!record.open || record.dataset.loaded) return;
     record.dataset.loaded = "1";
-    const { status, data: body } = await api("GET", `/turns/${data.turn_id}`);
-    record.append(el("pre", "", status === 200 ? JSON.stringify(body.record, null, 2)
-                                               : `Ответ ${status}: ${detail(body)}`));
+    let text;
+    try {
+      const { status, data: body } = await api("GET", `/turns/${data.turn_id}`);
+      text = status === 200 ? JSON.stringify(body.record, null, 2)
+                            : `Ответ ${status}: ${detail(body)}`;
+      if (status !== 200) delete record.dataset.loaded;
+    } catch (error) {
+      text = `Сервис недоступен: ${error}`;
+      delete record.dataset.loaded;
+    }
+    record.querySelector("pre")?.remove();
+    record.append(el("pre", "", text));
   });
   box.append(record);
   log.append(box);
@@ -172,7 +189,7 @@ $("ask").addEventListener("submit", async (event) => {
     waiting.remove();
     log.append(el("div", "msg", `Сервис недоступен: ${error}`));
   } finally {
-    $("send").disabled = false;
+    $("send").disabled = !$("user").value;
   }
 });
 
@@ -187,17 +204,27 @@ $("new").addEventListener("click", newSession);
 $("user").addEventListener("change", newSession);
 
 (async () => {
-  const { data } = await api("GET", "/users");
-  for (const user of data || []) {
-    const option = el("option", "", `${user.name} — ${user.position} (${user.user_id})`);
-    option.value = user.user_id;
-    $("user").append(option);
-  }
-  const { data: info } = await api("GET", "/info");
-  if (info && info.model) {
-    $("info").append(el("span", "", ` Модель: ${info.model}.`));
-  }
   newSession();
+  // Отправка доступна, только когда пользователь выбран: без него сервис ответит 401.
+  try {
+    const { status, data } = await api("GET", "/users");
+    if (status !== 200 || !Array.isArray(data) || !data.length) {
+      log.append(el("div", "msg", `Список пользователей недоступен: ${status}. Обновите страницу.`));
+      return;
+    }
+    for (const user of data) {
+      const option = el("option", "", `${user.name} — ${user.position} (${user.user_id})`);
+      option.value = user.user_id;
+      $("user").append(option);
+    }
+    $("send").disabled = false;
+    const { data: info } = await api("GET", "/info");
+    if (info && info.model) {
+      $("info").append(el("span", "", ` Модель: ${info.model}.`));
+    }
+  } catch (error) {
+    log.append(el("div", "msg", `Сервис недоступен: ${error}. Обновите страницу.`));
+  }
 })();
 </script>
 </body>

@@ -28,19 +28,29 @@ sh scripts/make-env.sh </dev/null
 # Файл собирается рядом и заменяет прежний целиком, с правами только для владельца.
 umask 077
 names=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' ../model.env)
+# Профили compose: прочие, заданные на сервере руками, сохраняются; proxy — по имени стенда.
+profiles=$(sed -n 's/^COMPOSE_PROFILES=//p' ../.env | tail -n 1 | tr ',' '\n' | grep -vx 'proxy' | grep -v '^$' || true)
+if grep -q '^STAND_DOMAIN=.' ../model.env; then
+    profiles=$(printf '%s\nproxy' "$profiles")
+fi
+profiles=$(printf '%s\n' "$profiles" | grep -v '^$' | paste -sd, - || true)
 {
     grep -v -E "^($(printf '%s|' $names SERVICE_BIND COMPOSE_PROFILES | sed 's/|$//'))=" ../.env || true
     cat ../model.env
-    # Имя стенда задано — поднимается и обратный прокси.
-    if grep -q '^STAND_DOMAIN=.' ../model.env; then
-        echo "COMPOSE_PROFILES=proxy"
-    fi
+    [ -z "$profiles" ] || echo "COMPOSE_PROFILES=$profiles"
     # 0.0.0.0 — только на сервере, где группу безопасности создаёт Terraform этого
     # репозитория; на сервере из панели — 127.0.0.1, проверка через SSH-туннель.
     echo "SERVICE_BIND=$bind"
 } > ../.env.new
 mv ../.env.new ../.env
 rm -f ../model.env
+
+# Имя стенда убрано — прокси останавливается: up без профиля его контейнер не трогает, и
+# он продолжал бы пускать снаружи по старому имени.
+case ",$profiles," in
+    *,proxy,*) ;;
+    *) docker compose -p oes-assistant --profile proxy rm --stop --force proxy </dev/null ;;
+esac
 
 # Скрипт читается из stdin: дочерние команды его не получают.
 GIT_COMMIT="$sha" docker compose -p oes-assistant up -d --build --wait --remove-orphans </dev/null
