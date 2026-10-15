@@ -77,6 +77,12 @@ variable "service_cidr" {
   }
 }
 
+variable "web_open" {
+  description = "Открыть порты 80 и 443 для обратного прокси (профиль compose proxy). Отовсюду: Let's Encrypt проверяет имя со своих адресов; вход закрыт паролем на прокси."
+  type        = bool
+  default     = false
+}
+
 variable "service_port" {
   description = "Порт сервиса ассистента."
   type        = number

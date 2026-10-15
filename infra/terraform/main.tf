@@ -54,6 +54,20 @@ resource "cloudru_evolution_compute_security_group_rule" "service" {
   remote_ip_prefix  = var.service_cidr
 }
 
+# Порты обратного прокси: только если web_open. Отовсюду — Let's Encrypt проверяет имя со
+# своих адресов, и список адресов здесь сломал бы выпуск сертификата. Вход закрыт паролем.
+resource "cloudru_evolution_compute_security_group_rule" "web" {
+  for_each = var.web_open ? toset(["80", "443"]) : toset([])
+
+  security_group_id = cloudru_evolution_compute_security_group.stand.id
+  description       = "Обратный прокси, порт ${each.key}"
+  direction         = "TRAFFIC_DIRECTION_INGRESS"
+  ether_type        = "ETHER_TYPE_IPV4"
+  ip_protocol       = "IP_PROTOCOL_TCP"
+  port_range        = "${each.key}:${each.key}"
+  remote_ip_prefix  = "0.0.0.0/0"
+}
+
 resource "cloudru_evolution_compute_security_group_rule" "egress" {
   security_group_id = cloudru_evolution_compute_security_group.stand.id
   description       = "Исходящий трафик: модель, образы контейнеров, пакеты"

@@ -565,7 +565,8 @@ def test_data_transactions_are_opened_only_through_the_bound_helper() -> None:
     # Правило «транзакция с данными — только с привязкой к пользователю» держит не база
     # (у app.actions построчной защиты нет), а то, что в коде сервиса нет другого способа
     # открыть транзакцию. Исключения — проверка готовности и сведения о сборке: обе читают
-    # только служебные записи без данных пользователя — версию схемы и хэш набора.
+    # только служебные записи без данных пользователя — версию схемы и хэш набора; и список
+    # пользователей для страницы: справочник без полномочий и групп, без построчной защиты.
     source = Path(__file__).resolve().parents[1] / "src" / "assistant"
     found = []
     for path in sorted(source.rglob("*.py")):
@@ -575,4 +576,77 @@ def test_data_transactions_are_opened_only_through_the_bound_helper() -> None:
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if ".begin(" in line or ".connect(" in line:
                 found.append(f"{relative}:{number}")
-    assert len(found) == 2 and all(item.startswith("api/app.py:") for item in found), found
+    assert len(found) == 3 and all(item.startswith("api/app.py:") for item in found), found
+
+
+# --- Страница для демонстрации -------------------------------------------------------------
+
+
+def test_page_is_served_without_data_or_rights_logic(service: Service) -> None:
+    reply = service.client.get("/")
+    assert reply.status_code == 200
+    assert reply.headers["content-type"].startswith("text/html")
+    page = reply.text
+    # Всё, что страница показывает, она берёт из API: пользователей в ней нет.
+    for path in ("/users", "/turn", "/actions/", "/turns/", "X-User-ID"):
+        assert path in page
+    users = service.client.get("/users").json()
+    assert users
+    for user in users:
+        assert user["user_id"] not in page
+
+
+def test_users_list_has_no_rights(service: Service) -> None:
+    users = service.client.get("/users").json()
+    assert [user["user_id"] for user in users] == sorted(user["user_id"] for user in users)
+    assert all(set(user) == {"user_id", "name", "position"} for user in users)
+
+
+def _visible_documents(database: Database, user: str) -> list[str]:
+    """Действующие документы, видимые группам пользователя, — своим запросом под владельцем."""
+    with database.owner.connect() as connection:
+        rows = connection.execute(
+            text(
+                "select distinct c.doc_id from kb.chunks c"
+                " where c.status = 'active' and c.acl && ("
+                "   select array_agg(group_name) || array['all']"
+                "   from app.user_groups where user_id = :user)"
+                " order by c.doc_id"
+            ),
+            {"user": user},
+        )
+        return [row[0] for row in rows]
+
+
+@pytest.mark.parametrize("user", ["u-eng", "u-k1", "u-hr"])
+def test_overview_follows_the_rights_of_the_user(
+    service: Service, database: Database, user: str
+) -> None:
+    reply = service.client.get("/overview", headers={"X-User-ID": user})
+    assert reply.status_code == 200
+    view = reply.json()
+    assert [doc["doc_id"] for doc in view["documents"]] == _visible_documents(database, user)
+    with database.owner.connect() as connection:
+        kpi = {
+            table: sorted(site for t, site in rows if t == table)
+            for rows in [
+                connection.execute(
+                    text("select table_name, site from app.kpi_grants where user_id = :u"),
+                    {"u": user},
+                ).all()
+            ]
+            for table in {t for t, _ in rows}
+        }
+        repair = sorted(
+            connection.scalars(
+                text("select site from app.repair_grants where user_id = :u"), {"u": user}
+            )
+        )
+    assert {item["table"]: item["sites"] for item in view["kpi"]} == kpi
+    assert view["repair_sites"] == repair
+    assert all(item["site"] in repair for item in view["equipment"])
+
+
+def test_overview_needs_a_known_user(service: Service) -> None:
+    assert service.client.get("/overview").status_code == 401
+    assert service.client.get("/overview", headers={"X-User-ID": "u-nobody"}).status_code == 401

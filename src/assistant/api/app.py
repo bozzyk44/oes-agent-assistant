@@ -5,16 +5,18 @@ import os
 import secrets
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import Engine, text
 
 from assistant import telemetry
+from assistant.access import load_grants, overview
 from assistant.actions.confirm import (
     Actions,
     Conflict,
@@ -62,6 +64,9 @@ _TURN_RECORD = text(
     " latency_ms, record, created_at from app.turns where turn_id = :turn_id"
 )
 _DATASET = text("select content_hash from app.dataset_version")
+_USERS = text("select user_id, name, position_title from app.users order by user_id")
+# Страница для демонстрации: один файл без сборки, логики прав в нём нет.
+_PAGE_FILE = Path(__file__).with_name("page.html")
 _READY = text(
     "select (select version_num from public.alembic_version),"
     " (select count(*) from app.dataset_version)"
@@ -126,8 +131,10 @@ def build_app(
     # Секрет ТОиР уходит только в модуль действий: ходу и модели его не передают.
     transport = toir_transport or http_transport(runtime.settings.toir_url)
     actions = Actions(engine, ToirClient(transport, toir_secret.token), store)
-    # Последняя версия схемы постоянна на всю жизнь процесса: читается один раз.
+    # Последняя версия схемы постоянна на всю жизнь процесса: читается один раз. Страница
+    # тоже: без файла сервис не стартует, а не отвечает 500 на первом открытии.
     schema_head = head_revision()
+    page_html = _PAGE_FILE.read_text(encoding="utf-8")
 
     def authenticate(x_user_id: str | None) -> str:
         """Одна проверка пользователя на все маршруты. Заголовок объявлен необязательным
@@ -207,6 +214,41 @@ def build_app(
         if not datasets:
             return JSONResponse(status_code=503, content={"status": "набор не загружен"})
         return JSONResponse(content={"status": "ok"})
+
+    @app.get("/", response_class=HTMLResponse)
+    def page() -> HTMLResponse:
+        """Чат для демонстрации. Всё, что он показывает, приходит из маршрутов ниже."""
+        return HTMLResponse(page_html)
+
+    @app.get("/users")
+    def users() -> JSONResponse:
+        """Список пользователей для выбора на странице. Пользователь в этом сервисе задаётся
+        доверенным заголовком `X-User-ID`, поэтому список прав не открывает: полномочий и
+        групп в нём нет — только идентификатор, ФИО и должность."""
+        with engine.connect() as connection:
+            rows = connection.execute(_USERS).all()
+        return JSONResponse(
+            content=[{"user_id": row[0], "name": row[1], "position": row[2]} for row in rows]
+        )
+
+    @app.get("/overview")
+    def user_overview(user_id: user) -> JSONResponse:
+        """Что пользователь может спросить: документы, данные КХД и заявки — по его правам,
+        через слой доступа. Для страницы: обзор и примеры вопросов."""
+        with transaction(engine, user_id) as connection:
+            grants = load_grants(connection, user_id)
+            if grants is None:
+                raise HTTPException(status_code=401, detail="неизвестный пользователь")
+            found = overview(connection, grants)
+        return JSONResponse(
+            content={
+                "user": {"name": grants.name, "position": grants.position},
+                "documents": found.documents,
+                "kpi": found.kpi,
+                "repair_sites": found.repair_sites,
+                "equipment": found.equipment,
+            }
+        )
 
     @app.get("/turns/{turn_id}")
     def turn_record(turn_id: str, user_id: user) -> JSONResponse:

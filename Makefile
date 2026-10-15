@@ -60,12 +60,12 @@ run: env
 observe: env
 	COMPOSE_PROFILES=observability OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 $(COMPOSE) up --build
 
-# Профиль наблюдаемости указан, чтобы её контейнер тоже останавливался.
+# Профили указаны, чтобы контейнеры наблюдаемости и прокси тоже останавливались.
 down:
-	$(COMPOSE) --profile observability down --remove-orphans
+	$(COMPOSE) --profile observability --profile proxy down --remove-orphans
 
 reset:
-	$(COMPOSE) --profile observability down --volumes --remove-orphans
+	$(COMPOSE) --profile observability --profile proxy down --volumes --remove-orphans
 
 # Миграции — отдельный шаг: тот же сервис compose, что стартует в `make run` между ролями
 # и загрузкой набора. PostgreSQL и шаг ролей поднимаются как зависимости.

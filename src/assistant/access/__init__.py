@@ -22,6 +22,7 @@ from assistant.access.kpi import (
     data_periods,
     query_rows,
 )
+from assistant.access.overview import Overview, overview
 from assistant.access.repair import RepairCheck, check_repair
 from assistant.access.status import Status
 
@@ -32,6 +33,7 @@ __all__ = [
     "Grants",
     "KpiQuery",
     "KpiResult",
+    "Overview",
     "Period",
     "RepairCheck",
     "SearchResult",
@@ -40,6 +42,7 @@ __all__ = [
     "data_periods",
     "get_document",
     "load_grants",
+    "overview",
     "query_rows",
     "search",
 ]

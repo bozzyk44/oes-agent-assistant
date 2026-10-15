@@ -26,9 +26,11 @@ known="$state/known_hosts"
 # Каталоги на сервере: код заменяется при каждой выкатке, .env остаётся.
 remote_home="oes"
 
-# Что из локального .env нужно серверу: модель и цены. Секреты базы и ТОиР — свои на сервере.
+# Что из локального .env нужно серверу: модель, цены и имя стенда для прокси. Секреты базы,
+# ТОиР и пароль прокси — свои на сервере.
 MODEL_VARS="MODEL_BASE_URL MODEL_API_KEY MODEL_NAME MODEL_MAX_OUTPUT_TOKENS MODEL_TIMEOUT_SECONDS
-MODEL_RESPONSE_FORMAT MODEL_EXTRA_BODY MODEL_TOKEN_CHARS PRICE_INPUT PRICE_CACHED PRICE_OUTPUT"
+MODEL_RESPONSE_FORMAT MODEL_EXTRA_BODY MODEL_TOKEN_CHARS PRICE_INPUT PRICE_CACHED PRICE_OUTPUT
+STAND_DOMAIN PROXY_USER"
 
 die() { echo "stand: $*" >&2; exit 1; }
 
