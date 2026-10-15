@@ -134,6 +134,19 @@ services:
     mem_limit: 192m
     restart: unless-stopped
 
+  # Наблюдаемость: трассы, метрики и журнал в одном контейнере — Grafana, Tempo, Mimir, Loki
+  # и сборщик OpenTelemetry (решение 9). Только с профилем observability: базовый запуск
+  # остаётся лёгким. Сервис шлёт телеметрию на lgtm:4318, если задан OTEL_EXPORTER_OTLP_ENDPOINT;
+  # `make observe` задаёт его сам. Наружу не публикуется ничего: Grafana — только на
+  # локальном адресе. Выкатка стенда этот профиль не включает. Данные живут внутри контейнера.
+  lgtm:
+    image: grafana/otel-lgtm:0.34.0
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    mem_limit: 1200m
+    restart: unless-stopped
+
   # Разовые команды: запускаются целями make, в `docker compose up` не участвуют.
 
   datagen:

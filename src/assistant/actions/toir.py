@@ -18,6 +18,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from assistant import telemetry
+
 log = logging.getLogger(__name__)
 
 TIMEOUT_SECONDS = 10.0
@@ -64,7 +66,14 @@ class ToirClient:
             "Idempotency-Key": idempotency_key,
             "Content-Type": "application/json",
         }
-        outcome = self._create(headers, params)
+        # Спан без заголовков и тела: в заголовках токен ТОиР.
+        with telemetry.span(
+            "POST /requests",
+            {"http.request.method": "POST", "url.path": "/requests"},
+            telemetry.SpanKind.CLIENT,
+        ) as current:
+            outcome = self._create(headers, params)
+            telemetry.set_attributes(current, {"assistant.toir.outcome": type(outcome).__name__})
         if not isinstance(outcome, Created):
             # Причина без тела запроса и без заголовков: токена в журнале нет.
             log.warning("заявка с ключом %s: %s", idempotency_key, outcome.reason)

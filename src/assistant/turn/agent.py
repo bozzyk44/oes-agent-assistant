@@ -14,12 +14,15 @@
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from assistant import telemetry
 from assistant.access import Status, data_periods, load_grants
 from assistant.actions.draft import TOOL as REPAIR_TOOL
 from assistant.config import ModelSettings
@@ -34,6 +37,7 @@ from assistant.model import (
     TransientModelError,
 )
 from assistant.tools.box import ToolBox, ToolResult, envelope
+from assistant.tools.schemas import ARGUMENTS
 from assistant.turn.calls import CALL_IN_TEXT, CALL_IN_TEXT_NOTE, NOT_EXECUTED, plan_calls
 from assistant.turn.context import (
     HistoryMessage,
@@ -169,6 +173,9 @@ class AgentHandler:
         self._format_mode = settings.response_format
         self._timeout = settings.timeout_seconds
         self._model_name = settings.name
+        self._max_output_tokens = settings.max_output_tokens
+        # Только хост: адрес провайдера в телеметрии — без учётных данных и параметров.
+        self._server = urlsplit(settings.base_url).hostname
         # Поправка оценки — общая на процесс: модель у процесса одна.
         self._estimator = Estimator(settings.token_costs)
         # Сервер отверг строгие параметры, а повтор без них прошёл — они выключены до
@@ -353,16 +360,64 @@ class AgentHandler:
 
     def _complete(self, request: ChatRequest, state: _State) -> ModelReply:
         try:
-            return self._model.complete(request)
+            return self._call_model(request)
         except FormatRejected:
             # Повтор без строгих параметров. Выключаются они, только если повтор прошёл:
             # иначе отказ был по другой причине — длина входа, шаблон чата.
             state.record["format_rejected"] = True
             plain = ChatRequest(request.messages, request.tools, None, None, request.timeout)
-            reply = self._model.complete(plain)
+            reply = self._call_model(plain)
             if not self._format_disabled:
                 log.warning("сервер модели отверг строгие параметры; принуждение выключено")
             self._format_disabled = True
+            return reply
+
+    def _call_model(self, request: ChatRequest) -> ModelReply:
+        """Вызов модели спаном по соглашениям OpenTelemetry для генеративного ИИ. Текста входа
+        и ответа в спане нет: в нём данные набора, доступные одному пользователю."""
+        # Провайдер — хост сервера модели: протокол у всех OpenAI-совместимый, а сервер —
+        # роутер, облако или локальная модель.
+        base = {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": self._server or "unknown",
+            "gen_ai.request.model": self._model_name,
+        }
+        attributes = {
+            **base,
+            "gen_ai.request.max_tokens": self._max_output_tokens,
+            "server.address": self._server,
+            "assistant.tool_choice": request.tool_choice,
+            "assistant.response_format": request.response_format is not None,
+        }
+        started = time.monotonic()
+        with telemetry.span(
+            f"chat {self._model_name}",
+            attributes,
+            telemetry.SpanKind.CLIENT,
+            # Отказ от строгих параметров — не сбой: запрос сразу повторяется без них.
+            expected=(FormatRejected,),
+        ) as current:
+            try:
+                reply = self._model.complete(request)
+            except Exception as error:
+                failed = {**base, "error.type": type(error).__name__}
+                telemetry.operation_duration.record(time.monotonic() - started, failed)
+                raise
+            telemetry.operation_duration.record(time.monotonic() - started, base)
+            usage = reply.usage
+            finish = "length" if reply.truncated else "tool_calls" if reply.tool_calls else "stop"
+            telemetry.set_attributes(
+                current,
+                {
+                    "gen_ai.usage.input_tokens": usage.input_tokens,
+                    "gen_ai.usage.output_tokens": usage.output_tokens,
+                    "gen_ai.usage.cache_read.input_tokens": usage.cached_input_tokens,
+                    "gen_ai.response.finish_reasons": [finish],
+                },
+            )
+            for kind, tokens in (("input", usage.input_tokens), ("output", usage.output_tokens)):
+                if tokens is not None:
+                    telemetry.token_usage.record(tokens, {**base, "gen_ai.token.type": kind})
             return reply
 
     def _run_tools(
@@ -393,7 +448,25 @@ class AgentHandler:
                     {"name": call.name, "arguments": call.arguments, "repeated": True}
                 )
                 continue
-            result = box.run(call.name, call.arguments)
+            # Имя и идентификатор вызова пишет модель: в телеметрию — только известное имя и
+            # короткий идентификатор, чтобы текст модели не попал в приёмник.
+            tool_name = call.name if call.name in ARGUMENTS else "unknown"
+            with telemetry.span(
+                f"execute_tool {tool_name}",
+                {
+                    "gen_ai.operation.name": "execute_tool",
+                    "gen_ai.tool.name": tool_name,
+                    "gen_ai.tool.call.id": call.call_id[:64],
+                },
+            ) as current:
+                result = box.run(call.name, call.arguments)
+                telemetry.set_attributes(
+                    current,
+                    {
+                        "assistant.tool.status": result.status.value,
+                        "assistant.tool.cut": bool(result.record.get("cut")),
+                    },
+                )
             state.calls[key] = result
             state.call_keys[call.call_id] = key
             state.statuses.append(
