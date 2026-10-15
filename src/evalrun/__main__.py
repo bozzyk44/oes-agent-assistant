@@ -3,20 +3,42 @@
     python -m evalrun                    прогон по запущенному сервису: results.jsonl и report.md
     python -m evalrun report [results]   report.md из results.jsonl, без обращения к сервису
     python -m evalrun compare A B        сравнение двух прогонов попарно по вопросам
+    python -m evalrun judge-set          набор для проверки LLM-судьи из сохранённых прогонов
+    python -m evalrun judge-check        проверка судьи на наборе — платно, с моделью судьи
+    python -m evalrun judge-report       отчёт проверки судьи из записанных вызовов — без модели
+    python -m evalrun judge R NAME       судья по прогону R (results.jsonl) — платно
 
 Окружение: ASSISTANT_URL, TOIR_URL, TOIR_TOKEN, QUESTIONS, DATA_DIR, EVAL_DIR,
-EVAL_ATTEMPTS (по умолчанию 3), PRICE_INPUT, PRICE_CACHED, PRICE_OUTPUT.
+EVAL_ATTEMPTS (по умолчанию 3), PRICE_INPUT, PRICE_CACHED, PRICE_OUTPUT; для судьи —
+JUDGE_MODEL, JUDGE_BASE_URL, JUDGE_API_KEY, JUDGE_EXTRA_BODY, JUDGE_PRICE_INPUT,
+JUDGE_PRICE_OUTPUT.
 """
 
+import json
 import os
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from evalrun.api import Service, Toir, Transport, urllib_transport
 from evalrun.compare import NotComparable, compare
+from evalrun.judge import Judge
+from evalrun.judgecheck import (
+    MIN_PARSED,
+    Entry,
+    JudgeUnavailable,
+    build_set,
+    check,
+    check_report,
+    judge_run,
+    parsed_share,
+    passed_criteria,
+    run_report,
+)
 from evalrun.mounts import check_mounts
 from evalrun.questions import QuestionError, file_hash, load
 from evalrun.report import build, read
@@ -104,6 +126,151 @@ def write_report(results: Path, out: Path) -> None:
     out.write_text(build(config, attempts), encoding="utf-8")
 
 
+def _judge(env: Mapping[str, str], transport: Transport | None) -> Judge:
+    model = env.get("JUDGE_MODEL", "").strip()
+    # Ключ модели сервиса — только вместе с её адресом: при своём адресе судьи ключ сервиса
+    # другому поставщику не уходит.
+    base_url = env.get("JUDGE_BASE_URL", "").strip()
+    api_key = env.get("JUDGE_API_KEY", "")
+    if not base_url:
+        base_url = env.get("MODEL_BASE_URL", "").strip()
+        api_key = api_key or env.get("MODEL_API_KEY", "")
+    if not model or not base_url:
+        raise SystemExit("судья: нужны JUDGE_MODEL и JUDGE_BASE_URL (или MODEL_BASE_URL)")
+    raw_extra = env.get("JUDGE_EXTRA_BODY", "").strip()
+    try:
+        extra = json.loads(raw_extra) if raw_extra else {}
+    except ValueError:
+        raise SystemExit("судья: JUDGE_EXTRA_BODY — ожидался объект JSON") from None
+    if not isinstance(extra, dict):
+        raise SystemExit("судья: JUDGE_EXTRA_BODY — ожидался объект JSON")
+    return Judge(
+        base_url,
+        api_key,
+        model,
+        transport or urllib_transport(HTTP_TIMEOUT),
+        extra_body=extra,
+    )
+
+
+def _judge_prices(env: Mapping[str, str]) -> tuple[float, float] | None:
+    prices = (_price(env, "JUDGE_PRICE_INPUT"), _price(env, "JUDGE_PRICE_OUTPUT"))
+    return (prices[0], prices[1]) if prices[0] is not None and prices[1] is not None else None
+
+
+def _jsonl(path: Path, items: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in items)
+    path.write_text(text, encoding="utf-8")
+
+
+@contextmanager
+def _appender(path: Path) -> Iterator[Callable[[dict[str, Any]], None]]:
+    """Каждый готовый вызов судьи — сразу строкой в файл: оплаченное не теряется."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as stream:
+
+        def write(call: dict[str, Any]) -> None:
+            stream.write(json.dumps(call, ensure_ascii=False) + "\n")
+            stream.flush()
+
+        yield write
+
+
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def _progress(done: int, total: int) -> None:
+    if done % 10 == 0 or done == total:
+        print(f"судья: {done} из {total}", flush=True)
+
+
+def judge_command(
+    argv: list[str], env: Mapping[str, str], transport: Transport | None = None
+) -> int:
+    out_dir = Path(env.get("EVAL_DIR", "/app/eval"))
+    folder = out_dir / "judge"
+    command = argv[0]
+    if command == "judge-set":
+        manual_path = folder / "manual.json"
+        manual = (
+            json.loads(manual_path.read_text(encoding="utf-8")) if manual_path.is_file() else {}
+        )
+        sources = {
+            "data": out_dir / "results.jsonl",
+            "holdout": out_dir / "holdout-set" / "results.jsonl",
+        }
+        entries = build_set(
+            {name: path for name, path in sources.items() if path.is_file()},
+            manual.get("answers", {}),
+            manual.get("instructions", {}),
+        )
+        _jsonl(folder / "set.jsonl", [entry.to_json() for entry in entries])
+        print(f"судья: набор {folder / 'set.jsonl'}, ответов {len(entries)}")
+        return 0
+    prices = _judge_prices(env)
+    if command == "judge-report":
+        # Отчёт проверки из записанных вызовов — без модели.
+        calls = _read_jsonl(folder / "check.jsonl")
+        model = str(calls[0].get("judge_model", "")) if calls else ""
+        (folder / "check.md").write_text(check_report(calls, model, prices), encoding="utf-8")
+        print(f"судья: {folder / 'check.md'}")
+        return 0
+    judge = _judge(env, transport)
+    if command == "judge-check":
+        entries = [Entry.from_json(raw) for raw in _read_jsonl(folder / "set.jsonl")]
+        partial = folder / "check.partial.jsonl"
+        try:
+            with _appender(partial) as sink:
+                calls = check(entries, judge, progress=_progress, sink=sink)
+        except JudgeUnavailable as error:
+            print(f"судья: не отвечает — {error}; прежняя проверка не тронута", file=sys.stderr)
+            return 1
+        if parsed_share(calls) < MIN_PARSED:
+            print(
+                f"судья: разобрано меньше {MIN_PARSED:.0%} вердиктов — прежняя проверка не"
+                f" тронута, вызовы — в {partial}",
+                file=sys.stderr,
+            )
+            return 1
+        _jsonl(folder / "check.jsonl", calls)
+        (folder / "check.md").write_text(check_report(calls, judge.model, prices), encoding="utf-8")
+        partial.unlink(missing_ok=True)
+        print(f"судья: {folder / 'check.md'}")
+        return 0
+    if command == "judge" and len(argv) == 3:
+        results, source = Path(argv[1]), argv[2]
+        checked = _read_jsonl(folder / "check.jsonl")
+        if not any(
+            all(call.get(key) == value for key, value in judge.config().items()) for call in checked
+        ):
+            print(
+                "судья: проверка судьи сделана другой моделью или с другой добавкой к запросу —"
+                " сначала make judge-check с этой конфигурацией",
+                file=sys.stderr,
+            )
+            return 1
+        names = passed_criteria(checked, judge.config())
+        # Имя — от файла прогона: два прогона в одном каталоге не затирают друг друга.
+        target = results.with_name(f"{results.stem}.judge.md")
+        partial = target.with_suffix(".partial.jsonl")
+        try:
+            with _appender(partial) as sink:
+                calls = judge_run(results, source, judge, names, progress=_progress, sink=sink)
+        except JudgeUnavailable as error:
+            print(f"судья: не отвечает — {error}", file=sys.stderr)
+            return 1
+        partial.unlink(missing_ok=True)
+        _jsonl(target.with_suffix(".jsonl"), calls)
+        target.write_text(run_report(calls, names, judge.model, prices), encoding="utf-8")
+        print(f"судья: {target}")
+        return 0
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str], env: Mapping[str, str]) -> int:
     command = argv[0] if argv else "run"
     if command == "run":
@@ -115,6 +282,8 @@ def main(argv: list[str], env: Mapping[str, str]) -> int:
         write_report(results, target)
         print(f"отчёт: {target}")
         return 0
+    if command.startswith("judge"):
+        return judge_command(argv, env)
     if command == "compare" and len(argv) == 3:
         try:
             text = compare(Path(argv[1]), Path(argv[2]))

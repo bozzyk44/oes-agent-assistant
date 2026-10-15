@@ -12,7 +12,7 @@ HOST_USER := $(shell id -u):$(shell id -g)
 # Коммит для GET /info; вне рабочей копии git — пусто.
 export GIT_COMMIT ?= $(shell git describe --always --dirty 2>/dev/null)
 
-.PHONY: help env data data-holdout run migrate migrate-check down reset test eval eval-report eval-compare mutants smoke ci lock stand stand-deploy stand-destroy stand-cloud-init observe
+.PHONY: help env data data-holdout run migrate migrate-check down reset test eval eval-report eval-compare judge-set judge-check judge-report judge mutants smoke ci lock stand stand-deploy stand-destroy stand-cloud-init observe
 
 help:
 	@echo "make data   — сгенерировать набор в data/"
@@ -25,6 +25,8 @@ help:
 	@echo "make eval   — прогон эталонных вопросов по запущенному сервису; QUESTIONS=<путь>, EVAL_ATTEMPTS=<число>"
 	@echo "make eval-report — пересобрать eval/report.md из eval/results.jsonl без сервиса"
 	@echo "make eval-compare A=<прогон> B=<прогон> — сравнить два прогона попарно по вопросам"
+	@echo "make judge-set — набор для проверки LLM-судьи из сохранённых прогонов, без модели"
+	@echo "make judge-check — проверка судьи на наборе (платно); make judge RESULTS=… NAME=… — судья по прогону (платно)"
 	@echo "make mutants — прогон против сборок с отключённой защитой; MUTANT_MODE=model — с настоящей моделью (платно)"
 	@echo "make migrate — применить миграции к базе текущего запуска; повтор ничего не меняет"
 	@echo "make migrate-check — проверка миграций: пустая база, повтор, откат и снова, сверка моделей"
@@ -105,6 +107,21 @@ eval-report: env
 eval-compare: env
 	@test -n "$(A)" -a -n "$(B)" || { echo 'нужно: make eval-compare A=eval/runs/<первый>.jsonl B=eval/runs/<второй>.jsonl'; exit 2; }
 	$(COMPOSE) --profile tools run --rm --build --no-deps --user $(HOST_USER) evalrun python -m evalrun compare /app/$(A) /app/$(B)
+
+# LLM-судья: набор для его проверки — без модели; проверка и оценка прогона — платно,
+# с моделью из JUDGE_MODEL, только с подтверждения.
+judge-set: env
+	$(COMPOSE) --profile tools run --rm --build --no-deps --user $(HOST_USER) evalrun python -m evalrun judge-set
+
+judge-check: env
+	$(COMPOSE) --profile tools run --rm --build --no-deps --user $(HOST_USER) evalrun python -m evalrun judge-check
+
+judge-report: env
+	$(COMPOSE) --profile tools run --rm --build --no-deps --user $(HOST_USER) evalrun python -m evalrun judge-report
+
+judge: env
+	@test -n "$(RESULTS)" -a -n "$(NAME)" || { echo 'нужно: make judge RESULTS=eval/results.jsonl NAME=data'; exit 2; }
+	$(COMPOSE) --profile tools run --rm --build --no-deps --user $(HOST_USER) evalrun python -m evalrun judge /app/$(RESULTS) $(NAME)
 
 # Мутанты: прогон против сборок сервиса с одной отключённой защитой, в своём проекте compose.
 # По умолчанию — послушная заглушка модели; MUTANT_MODE=model — настоящая модель из .env,
