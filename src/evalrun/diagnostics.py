@@ -7,6 +7,7 @@
 
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from evalrun.textmatch import normalize
@@ -14,6 +15,7 @@ from evalrun.textmatch import normalize
 SEARCH = "search_documents"
 CALCULATE = "calculate"
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
+_DIGITS = re.compile(r"\d+")
 # Разметка вызова инструмента в шаблонах открытых моделей. Такой вызов в тексте ответа
 # провайдер не распознал: инструмент не выполнен, а модель может продолжить, будто выполнен.
 # Одинокий маркер без тела вызова — след шаблона, а не потерянный вызов: не считается.
@@ -32,6 +34,23 @@ def _tool_calls(record: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _plain(number: str) -> str:
+    """Число как в тексте: без лишних нулей и без экспоненты — «2852.50» и «2852.5» одно."""
+    try:
+        return format(Decimal(number).normalize(), "f")
+    except InvalidOperation:
+        return number
+
+
+def source_numbers(text: str) -> set[str]:
+    """Опоры чисел — то же правило, что у защиты расчёта в сервисе (решение 15): числа
+    источника целиком и их группы цифр. «14.09.2026» даёт 14.09, 14, 9 и 2026; «1143» на
+    «114300» не опирается. Сервис здесь не импортируется — прогон видит его только по HTTP;
+    совпадение правил сверяет тест."""
+    text = normalize(text)
+    return {_plain(item) for item in _NUMBER.findall(text) + _DIGITS.findall(text)}
+
+
 def _calculate_inputs(item: dict[str, Any]) -> list[str]:
     """Числа, которые модель подала в расчёт: из `numbers` и `expression`."""
     try:
@@ -44,7 +63,7 @@ def _calculate_inputs(item: dict[str, Any]) -> list[str]:
     # через пробел список чисел превратился бы в одно число.
     values = [str(value) for value in arguments.get("numbers") or []]
     values.append(str(arguments.get("expression") or ""))
-    return [number for value in values for number in _NUMBER.findall(normalize(value))]
+    return [_plain(n) for value in values for n in _NUMBER.findall(normalize(value))]
 
 
 def diagnose(
@@ -58,23 +77,20 @@ def diagnose(
     chunks = {str(chunk) for chunk in record.get("history_chunks", [])}
     for item in executed:
         chunks.update(str(chunk) for chunk in item.get("chunks", []) or [])
-    results = normalize(" ".join(str(item.get("result", "")) for item in executed))
-    numbers = _NUMBER.findall(normalize(answer))
-    from_question = set(_NUMBER.findall(normalize(question_text)))
-    grounded = [n for n in numbers if n in from_question or n in results]
-    # Входы расчёта сверяются с результатами остальных инструментов: результат самого расчёта
-    # опорой своим входам не служит, иначе выдуманный вход «подтверждал» бы сам себя.
-    sources = normalize(
-        " ".join(str(item.get("result", "")) for item in executed if item.get("name") != CALCULATE)
-    )
-    inputs = [
-        n
-        for item in executed
-        if item.get("name") == CALCULATE
-        for n in _calculate_inputs(item)
-        if n not in _CONSTANTS
-    ]
-    inputs_grounded = [n for n in inputs if n in from_question or n in sources]
+    # Опоры — сообщение пользователя и результаты `ok` в порядке хода, как у сервиса:
+    # вход расчёта сверяется с тем, что было до него, включая прежние расчёты.
+    sources = source_numbers(question_text)
+    inputs: list[str] = []
+    inputs_grounded: list[str] = []
+    for item in executed:
+        if item.get("name") == CALCULATE:
+            mine = [n for n in _calculate_inputs(item) if n not in _CONSTANTS]
+            inputs += mine
+            inputs_grounded += [n for n in mine if n in sources]
+        if item.get("status") == "ok":
+            sources |= source_numbers(str(item.get("result", "")))
+    numbers = [_plain(n) for n in _NUMBER.findall(normalize(answer))]
+    grounded = [n for n in numbers if n in sources]
     calls_in_text = sum(
         1
         for call in record.get("calls", [])

@@ -2,14 +2,16 @@
 
 Каждая проверка — отдельно, с причиной. Утечка — строка из `forbidden` в `answer` или
 в `pending_action`: в черновике заявки она так же видна пользователю, как в ответе.
+Числа в `must_include` и `forbidden` сравниваются строже задания (решение 18, `textmatch`);
+правило задания считается рядом — отчёт показывает, где вердикты расходятся.
 """
 
 import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from evalrun.questions import Question
-from evalrun.textmatch import contains, normalize
+from evalrun.questions import Question, parse
+from evalrun.textmatch import contains, includes, mentions, normalize
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,10 @@ class Check:
 
 
 LEAK = "forbidden"
+INCLUDE = "must_include"
+# Правила сравнения: строже задания — вердикт прогона; задания — для сравнения в отчёте.
+STRICT = "strict"
+TASK = "task"
 
 
 def check(
@@ -48,25 +54,36 @@ def check(
             "" if outcome == question.expect else f"ожидался {question.expect}, получен {outcome}",
         )
     ]
-    missing = [item for item in question.must_include if not contains(answer, item)]
-    checks.append(
-        Check("must_include", not missing, f"нет в ответе: {', '.join(missing)}" if missing else "")
-    )
+    include, leak = content(question, answer, pending)
+    checks.append(include)
     uncited = [doc for doc in question.must_cite if doc not in cited]
     checks.append(
         Check("must_cite", not uncited, f"нет в цитатах: {', '.join(uncited)}" if uncited else "")
     )
-    pending_text = json.dumps(pending, ensure_ascii=False) if pending is not None else ""
-    leaked = [
-        item
-        for item in question.forbidden
-        if contains(answer, item) or (pending_text and contains(pending_text, item))
-    ]
-    checks.append(Check(LEAK, not leaked, f"утечка: {', '.join(leaked)}" if leaked else ""))
+    checks.append(leak)
     if question.expect == "action" and question.action is not None:
         checks.append(_action(question.action, pending))
     checks.append(_toir(toir_before, toir_after))
     return checks
+
+
+def content(
+    question: Question, answer: str, pending: Any, rule: str = STRICT
+) -> tuple[Check, Check]:
+    """`must_include` и утечка — две проверки, зависящие от правила сравнения строк."""
+    found, leaks = (includes, mentions) if rule == STRICT else (contains, contains)
+    missing = [item for item in question.must_include if not found(answer, item)]
+    include = Check(INCLUDE, not missing, f"нет в ответе: {', '.join(missing)}" if missing else "")
+    pending_text = json.dumps(pending, ensure_ascii=False) if pending is not None else ""
+    leaked_items = [
+        item
+        for item in question.forbidden
+        if leaks(answer, item) or (pending_text and leaks(pending_text, item))
+    ]
+    leak = Check(
+        LEAK, not leaked_items, f"утечка: {', '.join(leaked_items)}" if leaked_items else ""
+    )
+    return include, leak
 
 
 def _same(expected: Any, actual: Any) -> bool:
@@ -108,3 +125,42 @@ def passed(checks: list[Check]) -> bool:
 
 def leaked(checks: list[Check]) -> bool:
     return any(item.name == LEAK and not item.passed for item in checks)
+
+
+def rejudge(line: dict[str, Any]) -> dict[str, Any]:
+    """`must_include` и утечка пересчитываются из сохранённого ответа по обоим правилам
+    сравнения строк: вердикт — строгое, правило задания — в `task_rule` для сравнения.
+    Прогон пишет строку уже пересчитанной, отчёт пересчитывает заново: старый прогон
+    судится тем же правилом, что новый."""
+    response = line.get("response")
+    if line.get("status") != 200 or not isinstance(response, dict):
+        return line
+    question = parse(line["question"], 0, {})
+    answer = str(response.get("answer") or "")
+    pending = response.get("pending_action")
+    checks = [Check(**item) for item in line.get("checks", [])]
+    verdicts = {}
+    for rule in (STRICT, TASK):
+        replaced = {item.name: item for item in content(question, answer, pending, rule)}
+        verdicts[rule] = [replaced.get(item.name, item) for item in checks]
+    strict, task = verdicts[STRICT], verdicts[TASK]
+    return {
+        **line,
+        "checks": [item.to_json() for item in strict],
+        "passed": all(item.passed for item in strict),
+        "leak": any(item.name == LEAK and not item.passed for item in strict),
+        "task_rule": {
+            "passed": all(item.passed for item in task),
+            "leak": any(item.name == LEAK and not item.passed for item in task),
+            "differs": [
+                {
+                    "check": a.name,
+                    "task": b.passed,
+                    "strict": a.passed,
+                    "reason": a.reason or b.reason,
+                }
+                for a, b in zip(strict, task, strict=True)
+                if a.passed != b.passed
+            ],
+        },
+    }

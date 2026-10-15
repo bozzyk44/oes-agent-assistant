@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from evalrun.api import Service, Toir
-from evalrun.checks import check, leaked, passed
+from evalrun.checks import check, leaked, passed, rejudge
 from evalrun.diagnostics import diagnose
 from evalrun.questions import Question, sessions
 
@@ -108,25 +108,27 @@ class Runner:
             full = self.service.record(question.user, str(body["turn_id"]))
             record = full.get("record") if full else None
         answer = str(body.get("answer") or "") if isinstance(body, dict) else ""
-        return {
-            "type": "attempt",
-            "run_id": run_id,
-            "attempt": attempt,
-            "question": question.raw,
-            "labels": list(question.labels),
-            "session_id": session,
-            "status": status,
-            "response": body,
-            "busy_retries": retries,
-            "latency_ms": latency_ms,
-            "toir_before": before,
-            "toir_after": after,
-            "checks": [item.to_json() for item in checks],
-            "passed": passed(checks),
-            "leak": leaked(checks),
-            "diagnostics": diagnose(record, question.text, answer),
-            "turn_record": record,
-        }
+        return rejudge(
+            {
+                "type": "attempt",
+                "run_id": run_id,
+                "attempt": attempt,
+                "question": question.raw,
+                "labels": list(question.labels),
+                "session_id": session,
+                "status": status,
+                "response": body,
+                "busy_retries": retries,
+                "latency_ms": latency_ms,
+                "toir_before": before,
+                "toir_after": after,
+                "checks": [item.to_json() for item in checks],
+                "passed": passed(checks),
+                "leak": leaked(checks),
+                "diagnostics": diagnose(record, question.text, answer),
+                "turn_record": record,
+            }
+        )
 
     def run(
         self, questions: list[Question], plan: Plan, out: Path, now: Callable[[], datetime]
