@@ -18,6 +18,7 @@ from datagen.questions import (
     CASES,
     DOUBLE_CASES,
     MIN_NAME_PART,
+    accessible_cells,
     accessible_text,
     build_questions,
     has_tenths,
@@ -47,6 +48,7 @@ from datagen.world import (
     TRUCK,
     World,
 )
+from evalrun.textmatch import mentions
 
 MIN_QUESTIONS = 14
 MIN_SESSIONS = 2
@@ -171,13 +173,15 @@ def _strings(value: object) -> bool:
 
 def _check_questions(root: Path, name: str, problems: list[str]) -> None:
     """Формат вопросов и главное правило: строка `forbidden` не встречается в данных,
-    доступных автору вопроса, — иначе прогон покажет ложную утечку.
+    доступных автору вопроса, ни по одному правилу прогона — иначе прогон покажет ложную
+    утечку.
     """
     files = _files(root)
     users = users_by_id(files)
     docs = {path.removeprefix("docs/").removesuffix(".md") for path in files if "/" in path}
     seen: set[str] = set()
     texts: dict[str, str] = {}
+    cells: dict[str, str] = {}
     for record in _read_questions(root, name, problems):
         qid = record.get("id")
         where = f"{name}: {qid}"
@@ -214,9 +218,14 @@ def _check_questions(root: Path, name: str, problems: list[str]) -> None:
         text = texts.get(user)
         if text is None:
             text = texts[user] = accessible_text(files, users[user])
+            cells[user] = accessible_cells(files, users[user], "; ")
         forbidden = record.get("forbidden")
         for value in forbidden if isinstance(forbidden, list) else []:
-            if isinstance(value, str) and normalize(value) in text:
+            # Оба правила прогона: подстрока задания и строгое — для числа это ещё и его
+            # более точная запись (решение 18).
+            if isinstance(value, str) and (
+                normalize(value) in text or mentions(cells[user], value)
+            ):
                 problems.append(
                     f"{where}: строка forbidden «{value}» есть в данных, доступных автору"
                 )

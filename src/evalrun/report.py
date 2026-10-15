@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from evalrun.checks import rejudge
 from evalrun.diagnostics import diagnose, fragment_in_input
 
 STABLE = "проходит стабильно"
@@ -38,6 +39,7 @@ def read(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
 def _refreshed(line: dict[str, Any]) -> dict[str, Any]:
     """Диагностика пересчитывается из сохранённой записи хода: новая метрика появляется
     и в отчёте старого прогона, без вызовов модели. Записи нет — остаётся сохранённая."""
+    line = rejudge(line)
     record = line.get("turn_record")
     if not isinstance(record, dict):
         return line
@@ -141,6 +143,7 @@ def build(config: dict[str, Any], attempts: list[dict[str, Any]]) -> str:
     lines += _questions(attempts, status)
     lines += _diagnostics(attempts)
     lines += _retrieval(attempts)
+    lines += _rules(attempts)
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -310,7 +313,7 @@ def _diagnostics(attempts: list[dict[str, Any]]) -> list[str]:
             ),
             ("Опора чисел ответа на результаты инструментов или вопрос", _share(grounded, numbers)),
             (
-                "Опора входов расчёта на результаты других инструментов или вопрос",
+                "Опора входов расчёта на результаты инструментов хода или вопрос",
                 _share(_sum(diags, "calculate_inputs_grounded"), _sum(diags, "calculate_inputs")),
             ),
         ]
@@ -373,3 +376,54 @@ def _retrieval(attempts: list[dict[str, Any]]) -> list[str]:
         ("Ходов с повторным поиском", _share(repeated, len(rows))),
     ]
     return out + _table(table)
+
+
+def _rules(attempts: list[dict[str, Any]]) -> list[str]:
+    """Где вердикт строгого сравнения чисел расходится с правилом задания (решение 18)."""
+    ruled = [line for line in attempts if "task_rule" in line]
+    out = [
+        "## Сравнение чисел строже задания",
+        "",
+        "Вердикт прогона — числа целиком (решение 18); правило задания — подстрока.",
+        "",
+    ]
+    if not ruled:
+        return [*out, "Ответов для пересчёта нет.", ""]
+    task = [{**line, "passed": line["task_rule"]["passed"]} for line in ruled]
+    strict_status, task_status = statuses(ruled), statuses(task)
+    out += _table(
+        [
+            (
+                "Доля прошедших во всех попытках: строго / по заданию",
+                f"{_share(_stable(strict_status), len(strict_status))}"
+                f" / {_share(_stable(task_status), len(task_status))}",
+            ),
+            (
+                "Утечки, попыток: строго / по заданию",
+                f"{sum(1 for line in ruled if line['leak'])}"
+                f" / {sum(1 for line in ruled if line['task_rule']['leak'])}",
+            ),
+        ]
+    )
+    rows = [(line, item) for line in ruled for item in line["task_rule"]["differs"]]
+    if not rows:
+        return [*out, "Вердикты правил не расходятся ни в одной попытке.", ""]
+    out += [
+        "| Вопрос | Попытка | Проверка | По заданию | Строго | Причина |",
+        "|---|---|---|---|---|---|",
+    ]
+    for line, item in rows:
+        cells = [
+            str(line["question"]["id"]),
+            str(line["attempt"]),
+            item["check"],
+            "проходит" if item["task"] else "не проходит",
+            "проходит" if item["strict"] else "не проходит",
+            _cell(item["reason"] or "—"),
+        ]
+        out.append("| " + " | ".join(cells) + " |")
+    return [*out, ""]
+
+
+def _stable(status: dict[str, str]) -> int:
+    return sum(1 for value in status.values() if value == STABLE)
