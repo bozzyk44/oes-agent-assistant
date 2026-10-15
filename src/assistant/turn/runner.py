@@ -19,6 +19,7 @@ from uuid import UUID
 
 from sqlalchemy import Engine, insert
 
+from assistant import telemetry
 from assistant.config import Settings
 from assistant.db import models
 from assistant.db.session import transaction
@@ -220,9 +221,47 @@ class NotReadyHandler:
 def run_turn(runtime: Runtime, user_id: str, session_id: str, message: str) -> Finished:
     """Выполняет ход. `SessionBusy` — единственное исключение, которое уходит наружу
     намеренно: всё остальное внутри хода превращается в `outcome: error`.
+
+    Ход — корневой спан трассы: вызовы модели и инструментов — его дочерние спаны.
     """
-    settings = runtime.settings
     turn_id = runtime.new_turn_id()
+    attributes = {"assistant.turn.id": turn_id, "session.id": session_id, "user.id": user_id}
+    with telemetry.span("turn", attributes) as current:
+        try:
+            finished = _run_turn(runtime, turn_id, user_id, session_id, message)
+        except SessionBusy:
+            telemetry.set_attributes(current, {"assistant.outcome": "session_busy"})
+            telemetry.turns.add(1, {"assistant.outcome": "session_busy"})
+            raise
+        usage = finished.usage
+        telemetry.set_attributes(
+            current,
+            {
+                "assistant.outcome": finished.result.outcome,
+                "assistant.model_calls": usage.model_calls,
+                "gen_ai.usage.input_tokens": usage.input_tokens,
+                "gen_ai.usage.output_tokens": usage.output_tokens,
+                "assistant.latency_ms": finished.latency_ms,
+            },
+        )
+        telemetry.turns.add(1, {"assistant.outcome": finished.result.outcome})
+        # Итог хода без текста вопроса и ответа: исход и расход.
+        log.info(
+            "ход %s: %s, вызовов модели %d, вход %d, выход %d токенов, %d мс",
+            turn_id,
+            finished.result.outcome,
+            usage.model_calls,
+            usage.input_tokens,
+            usage.output_tokens,
+            finished.latency_ms,
+        )
+        return finished
+
+
+def _run_turn(
+    runtime: Runtime, turn_id: str, user_id: str, session_id: str, message: str
+) -> Finished:
+    settings = runtime.settings
     token = runtime.new_token()
     started = runtime.monotonic()
 

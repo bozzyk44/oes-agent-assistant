@@ -14,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import Engine, text
 
+from assistant import telemetry
 from assistant.actions.confirm import (
     Actions,
     Conflict,
@@ -92,6 +93,7 @@ def create_app() -> FastAPI:
     """Точка входа процесса: настройки из окружения. С меткой вместо секрета не стартует."""
     settings = load_settings(os.environ)
     secret = load_toir_secret(os.environ)
+    telemetry.setup(os.environ)
     engine = service_engine(settings.database_url)
     return build_app(default_runtime(settings, engine, make_handler(settings, engine)), secret)
 

@@ -12,12 +12,13 @@ HOST_USER := $(shell id -u):$(shell id -g)
 # Коммит для GET /info; вне рабочей копии git — пусто.
 export GIT_COMMIT ?= $(shell git describe --always --dirty 2>/dev/null)
 
-.PHONY: help env data data-holdout run migrate migrate-check down reset test eval eval-report eval-compare mutants smoke ci lock stand stand-deploy stand-destroy stand-cloud-init
+.PHONY: help env data data-holdout run migrate migrate-check down reset test eval eval-report eval-compare mutants smoke ci lock stand stand-deploy stand-destroy stand-cloud-init observe
 
 help:
 	@echo "make data   — сгенерировать набор в data/"
 	@echo "make data-holdout — набор для итоговой проверки с другим зерном в holdout/"
 	@echo "make run    — создать .env при необходимости и поднять сервис, заглушку ТОиР и PostgreSQL"
+	@echo "make observe — то же, что run, плюс наблюдаемость: трассы, метрики и журнал в Grafana на 127.0.0.1:3000"
 	@echo "make down   — остановить; том базы остаётся"
 	@echo "make reset  — остановить и удалить том базы"
 	@echo "make test   — линтер, типы и тесты, без сети и модели"
@@ -54,11 +55,17 @@ data-holdout: env
 run: env
 	$(COMPOSE) up --build
 
+# Сервис с наблюдаемостью: контейнер grafana/otel-lgtm и адрес приёмника для сервиса.
+# Grafana — http://127.0.0.1:3000. Заданные в оболочке переменные сильнее .env.
+observe: env
+	COMPOSE_PROFILES=observability OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 $(COMPOSE) up --build
+
+# Профиль наблюдаемости указан, чтобы её контейнер тоже останавливался.
 down:
-	$(COMPOSE) down --remove-orphans
+	$(COMPOSE) --profile observability down --remove-orphans
 
 reset:
-	$(COMPOSE) down --volumes --remove-orphans
+	$(COMPOSE) --profile observability down --volumes --remove-orphans
 
 # Миграции — отдельный шаг: тот же сервис compose, что стартует в `make run` между ролями
 # и загрузкой набора. PostgreSQL и шаг ролей поднимаются как зависимости.

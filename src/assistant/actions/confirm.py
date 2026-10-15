@@ -27,6 +27,7 @@ from typing import Any
 
 from sqlalchemy import Connection, Engine, text
 
+from assistant import telemetry
 from assistant.access import Status, check_repair, load_grants
 from assistant.actions.toir import Created, Rejected, ToirClient, Unknown
 from assistant.db.session import transaction
@@ -95,6 +96,12 @@ class Actions:
 
     def confirm(self, action_id: str, user_id: str) -> str:
         """Подтверждает действие и возвращает `request_id` заявки в ТОиР."""
+        with telemetry.span(
+            "action confirm", {"assistant.action.id": action_id, "user.id": user_id}
+        ):
+            return self._confirm(action_id, user_id)
+
+    def _confirm(self, action_id: str, user_id: str) -> str:
         with transaction(self.engine, user_id) as connection:
             row = self._own(connection, action_id, user_id)
             if row.status == "done" and row.request_id:
