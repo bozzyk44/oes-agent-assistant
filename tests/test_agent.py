@@ -463,6 +463,48 @@ def test_answer_numbers_are_matched_whole_and_dates_by_parts() -> None:
     assert unsourced_numbers("было 124.5 ч, а не 0", source) == ["124.5", "0"]
     # Число не опирается на часть другого числа.
     assert unsourced_numbers("285", source) == ["285"]
+    # Дата в конце предложения и без года — тоже дата, а не дробное число.
+    assert unsourced_numbers("Данных нет до 15.03.2026. С 01.03 — тоже.", source) == []
+    # Пробел между двумя числами их не склеивает; разряды одного числа склеивает.
+    assert unsourced_numbers("с 01.03.2026 15.03.2026 нет", source) == []
+    assert unsourced_numbers("итог 2 852,50", source) == []
+
+
+def test_refusal_does_not_lean_on_earlier_model_answers(database: Database, small: Path) -> None:
+    model = ScriptedModel(
+        [
+            final("Простой на K1 — 124.5 ч", "answer"),
+            tools(_downtime_k2()),
+            final("На K2, как и на K1, 124.5 ч", "refusal"),
+        ]
+    )
+    service, _ = _service(database, model)
+    session = new_session()
+    service.turn("u-k1", session, "Сколько простоя на K1?")
+    reply = service.turn("u-k1", session, "Сколько простоя на K2 с 01.03.2026 по 15.03.2026?")
+    # Число из прежнего ответа модели могло быть выдумано: опорой для отказа оно не служит.
+    assert reply.body["answer"] == REFUSAL_ANSWER
+
+
+def test_kpi_denial_keeps_the_period_computed_by_code(database: Database, small: Path) -> None:
+    model = ScriptedModel(
+        [
+            tools(
+                call(
+                    KPI,
+                    table="downtime",
+                    filters=[{"column": "site", "op": "eq", "value": "K2"}],
+                    period={"relative": "last_7_days"},
+                )
+            ),
+            final("Нет доступа", "refusal"),
+        ]
+    )
+    service, _ = _service(database, model)
+    service.turn("u-k1", new_session(), "Простой на K2 за неделю?")
+    (result,) = _results(model, KPI)
+    assert result["status"] == "denied"
+    assert result["note"].startswith("Период «") and result["note"].endswith("Доступа нет.")
 
 
 def test_history_is_visible_in_the_next_turn(database: Database, small: Path) -> None:

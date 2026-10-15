@@ -112,7 +112,8 @@ def run_kpi(connection: Connection, grants: Grants, args: KpiArgs) -> KpiAnswer:
         elif found.status is Status.DENIED:
             # Только категория: пояснение к данным при отказе читалось как указание
             # посчитать — модель называла выдуманное число (EVAL.md, провал 6).
-            answer.note = DENIED_NOTE
+            # Период, посчитанный кодом, — пересказ запроса, а не данные: остаётся.
+            answer.note = " ".join(part for part in (resolved, DENIED_NOTE) if part)
         return answer
 
     rows = [_with_derived(args.table, row, bounds) for row in found.rows]

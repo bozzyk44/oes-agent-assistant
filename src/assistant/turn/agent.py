@@ -126,15 +126,16 @@ class _State:
         ]
 
     def sources(self) -> str:
-        """Всё, что модель могла видеть в этом ходе, кроме системной части: сведения
-        о пользователе, история, сообщение и результаты всех выполненных вызовов, включая
-        убранные из входа ради бюджета."""
+        """Опора чисел отказа: сведения о пользователе, сообщения пользователя из вошедшей
+        во вход истории, текущее сообщение и результаты всех выполненных вызовов, включая
+        убранные из входа ради бюджета. Прежние ответы модели опорой не считаются: число,
+        выдуманное в ответе, иначе стало бы опорой для отказа."""
         results = [
             str(item.get("result", ""))
             for call in self.record["calls"]
             for item in call.get("tool_calls", [])
         ]
-        texts = [item.text for item in self.history]
+        texts = [item.text for item in self.history[self.history_from :] if item.role == "user"]
         return "\n".join([self.info, self.actions, self.question, *texts, *results])
 
     def seen_chunks(self) -> set[str]:

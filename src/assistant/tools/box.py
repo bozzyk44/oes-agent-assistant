@@ -35,7 +35,7 @@ from assistant.access import (
 from assistant.actions.draft import prepare_repair
 from assistant.ingest.chunks import TOOL_RESULT_TOKENS
 from assistant.tools.arith import NUMBER, BadExpression, evaluate, literals, normalize_digits
-from assistant.tools.kpi import _number, round_half_up, run_kpi
+from assistant.tools.kpi import DENIED_NOTE, _number, round_half_up, run_kpi
 from assistant.tools.schemas import (
     ARGUMENTS,
     CalculateArgs,
@@ -175,7 +175,7 @@ class ToolBox:
     def _document(self, connection: Connection, args: DocumentArgs) -> ToolResult:
         found = get_document(connection, self.grants, args.ref)
         if found.status is not Status.OK:
-            note = "Доступа нет." if found.status is Status.DENIED else "Такого документа нет."
+            note = DENIED_NOTE if found.status is Status.DENIED else "Такого документа нет."
             return ToolResult(found.status, envelope(found.status, note=note))
         chunks = found.chunks
         note = ""
@@ -310,16 +310,29 @@ def source_numbers(text: str) -> set[str]:
     return {_plain(Decimal(item)) for item in found}
 
 
-# Дата в тексте: «14.09.2026» или «2026-09-14». Иначе «14.09» читалось бы дробным числом,
-# а в источнике та же дата могла быть записана по-другому.
-_DATE = re.compile(r"(?<![\d.])\d{1,2}\.\d{1,2}\.\d{4}(?![\d.])|(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
+# Дата: «14.09.2026», «14.09» или «2026-09-14». Иначе «14.09» читалось бы дробным числом,
+# а в источнике та же дата записана по-другому. Месяц — 01–12; точка в конце предложения
+# датой не считается.
+_DATE = re.compile(
+    r"(?<![\d.])(?:\d{1,2}\.(?:0[1-9]|1[0-2])(?:\.\d{4})?|\d{4}-\d{2}-\d{2})(?!\d|\.\d)"
+)
+# Разряды одного числа: группа из одной-трёх цифр, за ней группы ровно по три через пробел.
+# Пробел между двумя числами их не склеивает: «01.03.2026 15.03.2026» — две даты.
+_GROUPED = re.compile(r"(?<![\w.])\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?!\d)")
+_SPACES = re.compile(r"[ \u00a0\u202f]")
+_COMMA = re.compile(r"(?<=\d),(?=\d)")
+
+
+def _split_digits(text: str) -> str:
+    """Нормализация строгого сравнения прогона: пробел убирается только между разрядами."""
+    return _COMMA.sub(".", _GROUPED.sub(lambda match: _SPACES.sub("", match.group()), text))
 
 
 def unsourced_numbers(text: str, source: str) -> list[str]:
-    """Числа текста, которых нет в источнике ни целиком, ни группой цифр, — по тому же
-    правилу, что входы расчёта, без постоянных. Дата сверяется по частям: день, месяц, год."""
-    known = source_numbers(normalize_digits(source))
-    prepared = normalize_digits(text)
+    """Числа текста, которых нет в источнике ни целиком, ни группой цифр, — по правилу
+    входов расчёта, без постоянных. Дата сверяется по частям: день, месяц, год."""
+    known = source_numbers(normalize_digits(source)) | source_numbers(_split_digits(source))
+    prepared = _split_digits(text)
     parts = [part for date in _DATE.findall(prepared) for part in _DIGITS.findall(date)]
     numbers = NUMBER.findall(_DATE.sub(" ", prepared))
     found = dict.fromkeys(_plain(Decimal(item)) for item in [*parts, *numbers])
