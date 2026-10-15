@@ -5,6 +5,7 @@
     python -m evalrun compare A B        сравнение двух прогонов попарно по вопросам
     python -m evalrun judge-set          набор для проверки LLM-судьи из сохранённых прогонов
     python -m evalrun judge-check        проверка судьи на наборе — платно, с моделью судьи
+    python -m evalrun judge-report       отчёт проверки судьи из записанных вызовов — без модели
     python -m evalrun judge R NAME       судья по прогону R (results.jsonl) — платно
 
 Окружение: ASSISTANT_URL, TOIR_URL, TOIR_TOKEN, QUESTIONS, DATA_DIR, EVAL_DIR,
@@ -122,7 +123,13 @@ def write_report(results: Path, out: Path) -> None:
 
 def _judge(env: Mapping[str, str], transport: Transport | None) -> Judge:
     model = env.get("JUDGE_MODEL", "").strip()
+    # Ключ модели сервиса — только вместе с её адресом: при своём адресе судьи ключ сервиса
+    # другому поставщику не уходит.
     base_url = env.get("JUDGE_BASE_URL", "").strip()
+    api_key = env.get("JUDGE_API_KEY", "")
+    if not base_url:
+        base_url = env.get("MODEL_BASE_URL", "").strip()
+        api_key = api_key or env.get("MODEL_API_KEY", "")
     if not model or not base_url:
         raise SystemExit("судья: нужны JUDGE_MODEL и JUDGE_BASE_URL (или MODEL_BASE_URL)")
     raw_extra = env.get("JUDGE_EXTRA_BODY", "").strip()
@@ -134,7 +141,7 @@ def _judge(env: Mapping[str, str], transport: Transport | None) -> Judge:
         raise SystemExit("судья: JUDGE_EXTRA_BODY — ожидался объект JSON")
     return Judge(
         base_url,
-        env.get("JUDGE_API_KEY", ""),
+        api_key,
         model,
         transport or urllib_transport(HTTP_TIMEOUT),
         extra_body=extra,
@@ -185,8 +192,15 @@ def judge_command(
         _jsonl(folder / "set.jsonl", [entry.to_json() for entry in entries])
         print(f"судья: набор {folder / 'set.jsonl'}, ответов {len(entries)}")
         return 0
-    judge = _judge(env, transport)
     prices = _judge_prices(env)
+    if command == "judge-report":
+        # Отчёт проверки из записанных вызовов — без модели.
+        calls = _read_jsonl(folder / "check.jsonl")
+        model = str(calls[0].get("judge_model", "")) if calls else ""
+        (folder / "check.md").write_text(check_report(calls, model, prices), encoding="utf-8")
+        print(f"судья: {folder / 'check.md'}")
+        return 0
+    judge = _judge(env, transport)
     if command == "judge-check":
         entries = [Entry.from_json(raw) for raw in _read_jsonl(folder / "set.jsonl")]
         calls = check(entries, judge, progress=_progress)
@@ -196,12 +210,23 @@ def judge_command(
         return 0
     if command == "judge" and len(argv) == 3:
         results, source = Path(argv[1]), argv[2]
-        names = passed_criteria(_read_jsonl(folder / "check.jsonl"))
+        checked = _read_jsonl(folder / "check.jsonl")
+        if not any(
+            all(call.get(key) == value for key, value in judge.config().items()) for call in checked
+        ):
+            print(
+                "судья: проверка судьи сделана другой моделью или с другой добавкой к запросу —"
+                " сначала make judge-check с этой конфигурацией",
+                file=sys.stderr,
+            )
+            return 1
+        names = passed_criteria(checked, judge.config())
         calls = judge_run(results, source, judge, names, progress=_progress)
-        _jsonl(results.with_name("judge.jsonl"), calls)
-        report = run_report(calls, names, judge.model, prices)
-        results.with_name("judge.md").write_text(report, encoding="utf-8")
-        print(f"судья: {results.with_name('judge.md')}")
+        # Имя — от файла прогона: два прогона в одном каталоге не затирают друг друга.
+        target = results.with_name(f"{results.stem}.judge.md")
+        _jsonl(target.with_suffix(".jsonl"), calls)
+        target.write_text(run_report(calls, names, judge.model, prices), encoding="utf-8")
+        print(f"судья: {target}")
         return 0
     print(__doc__, file=sys.stderr)
     return 2

@@ -12,7 +12,7 @@ HOST_USER := $(shell id -u):$(shell id -g)
 # Коммит для GET /info; вне рабочей копии git — пусто.
 export GIT_COMMIT ?= $(shell git describe --always --dirty 2>/dev/null)
 
-.PHONY: help env data data-holdout run migrate migrate-check down reset test eval eval-report eval-compare judge-set judge-check judge mutants smoke ci lock stand stand-deploy stand-destroy stand-cloud-init observe
+.PHONY: help env data data-holdout run migrate migrate-check down reset test eval eval-report eval-compare judge-set judge-check judge-report judge mutants smoke ci lock stand stand-deploy stand-destroy stand-cloud-init observe
 
 help:
 	@echo "make data   — сгенерировать набор в data/"
@@ -115,6 +115,9 @@ judge-set: env
 
 judge-check: env
 	$(COMPOSE) --profile tools run --rm --build --no-deps --user $(HOST_USER) evalrun python -m evalrun judge-check
+
+judge-report: env
+	$(COMPOSE) --profile tools run --rm --build --no-deps --user $(HOST_USER) evalrun python -m evalrun judge-report
 
 judge: env
 	@test -n "$(RESULTS)" -a -n "$(NAME)" || { echo 'нужно: make judge RESULTS=eval/results.jsonl NAME=data'; exit 2; }

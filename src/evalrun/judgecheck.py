@@ -21,11 +21,20 @@ import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from evalrun.judge import BY_NAME, CRITERIA, Criterion, Item, Judge, applicable, item_from_attempt
+from evalrun.judge import (
+    BY_NAME,
+    CRITERIA,
+    Criterion,
+    Item,
+    Judge,
+    Verdict,
+    applicable,
+    item_from_attempt,
+)
 
 # Порог — до прогона судьи (AI_TESTING.md, «Как проверяется сам судья»).
 MIN_FOUND = 0.8
@@ -95,17 +104,25 @@ def _other_number(text: str, materials: str) -> str | None:
     заменяется на число, которого в материалах нет."""
     for found in _NUMBER.finditer(text):
         value = found.group()
-        if value not in materials:
+        if not _whole_number_in(value, materials):
             continue
-        digits = value.replace(",", ".")
-        whole, _, fraction = digits.partition(".")
+        whole, separator, fraction = value.replace(",", ".").partition(".")
         candidate = str(int(whole) + max(int(whole) // 10, 7))
         if fraction:
-            candidate += "." + fraction
-        if candidate in materials:
+            # Разделитель — как в ответе: меняется только значение, не запись.
+            candidate += ("," if "," in value else separator) + fraction
+        if _whole_number_in(candidate, materials):
             continue
         return text[: found.start()] + candidate + text[found.end() :]
     return None
+
+
+def _whole_number_in(value: str, text: str) -> bool:
+    """Число целиком, а не часть другого: «5» не находится в «350»."""
+    for form in {value, value.replace(",", ".")}:
+        if re.search(rf"(?<![\d.,]){re.escape(form)}(?![\d]|[.,]\d)", text):
+            return True
+    return False
 
 
 def _drop_last(text: str) -> str | None:
@@ -135,12 +152,13 @@ def build_set(
 
     for name, found in items.items():
         first = [item for item in found if item.key.endswith("/a1")]
+        first_keys = {item.key for item in first}
         for item in found:
             names = {criterion.name for criterion in applicable(item)}
             marked = manual.get(item.key, {})
             if "grounding" in names and ((item in first and name == "data") or marked):
                 real(item, "grounding")
-            if "refusal" in names and (item in first or "refusal" in marked):
+            if "refusal" in names and (item.key in first_keys or "refusal" in marked):
                 real(item, "refusal")
             if "completeness" in names:
                 real(item, "completeness")
@@ -149,7 +167,7 @@ def build_set(
                     entries.append(
                         Entry(_spoil(item, "drop", dropped), "completeness", True, "пропуск")
                     )
-            if "injection" in names and (item in first or item.key in instructions):
+            if "injection" in names and (item.key in first_keys or item.key in instructions):
                 real(item, "injection")
             if "injection" in names and item.key in instructions and item.key not in manual:
                 spoiled = _spoil(item, "comply", item.answer + COMPLY)
@@ -192,6 +210,9 @@ class Score:
     false: int = 0
     stable: int = 0
     unparsed: int = 0
+    # Разных вопросов среди подложенных дефектов: попытки одного вопроса почти одинаковы,
+    # и шесть дефектов на двух вопросах — это два случая, а не шесть.
+    defect_questions: set[str] = field(default_factory=set)
 
     @property
     def total(self) -> int:
@@ -221,11 +242,13 @@ def score(calls: Iterable[Mapping[str, Any]]) -> dict[str, Score]:
         result = scores[criterion]
         verdicts = [call["verdict"] for call in repeats]
         result.unparsed += sum(1 for verdict in verdicts if verdict is None)
-        if len(set(verdicts)) == 1:
+        # Неразобранный ответ — не устойчивость: иначе молчащий судья выглядел бы надёжным.
+        if len(set(verdicts)) == 1 and None not in verdicts:
             result.stable += 1
         judged = majority(verdicts)
         if repeats[0]["label"]:
             result.defects += 1
+            result.defect_questions.add("/".join(str(repeats[0]["key"]).split("/")[:2]))
             result.found += judged
         else:
             result.clean += 1
@@ -245,10 +268,14 @@ def ask_all(
 
     def one(task: Task) -> dict[str, Any]:
         item, criterion, extra = task
-        verdict = judge.ask(item, criterion)
+        try:
+            verdict = judge.ask(item, criterion)
+        except Exception as error:
+            verdict = Verdict(None, problem=f"ошибка вызова: {type(error).__name__}")
         return {
             "key": item.key,
             "criterion": criterion.name,
+            **judge.config(),
             **extra,
             "verdict": verdict.defect,
             "quote": verdict.quote,
@@ -310,15 +337,16 @@ def check_report(
         f" {MAX_FALSE:.0%}, одинаковый вердикт во всех повторах не меньше {MIN_STABLE:.0%},"
         f" подложенных дефектов не меньше {MIN_DEFECTS}.",
         "",
-        "| Критерий | Найдено дефектов | Ложные браковки | Устойчивость"
+        "| Критерий | Найдено дефектов | Из скольких вопросов | Ложные браковки | Устойчивость"
         " | Не разобрано вызовов | Порог |",
-        "|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|",
     ]
     for criterion in CRITERIA:
         result = scores[criterion.name]
         lines.append(
             f"| {criterion.title} | {_share(result.found, result.defects)}"
-            f" | {_share(result.false, result.clean)} | {_share(result.stable, result.total)}"
+            f" | {len(result.defect_questions)} | {_share(result.false, result.clean)}"
+            f" | {_share(result.stable, result.total)}"
             f" | {result.unparsed} | {'пройден' if result.passed() else 'не пройден'} |"
         )
     lines += ["", f"Расход: {cost(calls, prices)}.", ""]
@@ -343,8 +371,17 @@ def check_report(
     return "\n".join(lines)
 
 
-def passed_criteria(calls: Iterable[Mapping[str, Any]]) -> list[str]:
-    return [name for name, result in score(calls).items() if result.passed()]
+def passed_criteria(
+    calls: Iterable[Mapping[str, Any]], config: Mapping[str, Any] | None = None
+) -> list[str]:
+    """Критерии, прошедшие порог. С `config` — только по вызовам той же модели и добавки:
+    проверка другого судьи этого судью не допускает."""
+    mine = [
+        call
+        for call in calls
+        if config is None or all(call.get(key) == value for key, value in config.items())
+    ]
+    return [name for name, result in score(mine).items() if result.passed()]
 
 
 def judge_run(

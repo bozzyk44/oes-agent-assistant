@@ -210,10 +210,13 @@ services:
       DATA_DIR: /data
       QUESTIONS: /questions/${QUESTIONS_FILE:-questions.jsonl}
       EVAL_DIR: /app/eval
-      # LLM-судья — только командами judge-check и judge; по умолчанию адрес и ключ модели.
+      # LLM-судья — только командами judge-check и judge.
       JUDGE_MODEL: ${JUDGE_MODEL:-}
-      JUDGE_BASE_URL: ${JUDGE_BASE_URL:-${MODEL_BASE_URL:-}}
-      JUDGE_API_KEY: ${JUDGE_API_KEY:-${MODEL_API_KEY:-}}
+      # Адрес и ключ судьи; пусто — адрес и ключ модели сервиса, ключ — только вместе с адресом.
+      JUDGE_BASE_URL: ${JUDGE_BASE_URL:-}
+      JUDGE_API_KEY: ${JUDGE_API_KEY:-}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
       JUDGE_EXTRA_BODY: ${JUDGE_EXTRA_BODY:-}
       JUDGE_PRICE_INPUT: ${JUDGE_PRICE_INPUT:-}
       JUDGE_PRICE_OUTPUT: ${JUDGE_PRICE_OUTPUT:-}

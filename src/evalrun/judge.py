@@ -178,6 +178,10 @@ class Judge:
     # Добавка к телу запроса — например, выключить рассуждение модели-судьи.
     extra_body: Mapping[str, Any] = field(default_factory=dict)
 
+    def config(self) -> dict[str, Any]:
+        """Чем судили: проверка судьи действительна только для той же модели и добавки."""
+        return {"judge_model": self.model, "judge_extra": dict(self.extra_body)}
+
     def ask(self, item: Item, criterion: Criterion) -> Verdict:
         body = {
             "model": self.model,
@@ -191,11 +195,19 @@ class Judge:
         status, reply = self.transport(
             "POST", self.base_url.rstrip("/") + "/chat/completions", headers, body
         )
-        if status != 200 or not isinstance(reply, dict) or not reply.get("choices"):
+        # Ответ провайдера разбирается осторожно: кривой ответ — неразобранный вердикт,
+        # а не исключение, которое оборвало бы весь платный запуск.
+        if status != 200 or not isinstance(reply, dict):
             return Verdict(None, problem=f"судья не ответил: {status}")
-        usage = reply.get("usage") or {}
-        choice = reply["choices"][0]
-        content = str(choice.get("message", {}).get("content") or "")
+        choices = reply.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        if not isinstance(choice, dict):
+            return Verdict(None, problem="в ответе судьи нет choices")
+        raw_usage = reply.get("usage")
+        usage: Mapping[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
+        raw_message = choice.get("message")
+        message: Mapping[str, Any] = raw_message if isinstance(raw_message, dict) else {}
+        content = str(message.get("content") or "")
         defect, quote, problem = parse(content, item.answer)
         if defect is None and choice.get("finish_reason") == "length":
             problem = "ответ судьи обрезан потолком выхода"

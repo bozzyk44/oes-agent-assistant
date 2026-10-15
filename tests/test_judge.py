@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from evalrun.__main__ import _judge
 from evalrun.judge import BY_NAME, Item, Judge, applicable, item_from_attempt, parse
 from evalrun.judgecheck import (
     CLAIM,
@@ -12,6 +13,7 @@ from evalrun.judgecheck import (
     HINT,
     _drop_last,
     _other_number,
+    ask_all,
     build_set,
     passed_criteria,
     score,
@@ -201,3 +203,63 @@ def test_judge_call_goes_to_the_judge_model() -> None:
         _item(), BY_NAME["grounding"]
     )
     assert failed.defect is None and "502" in failed.problem
+
+
+def test_silent_judge_is_not_stable_and_config_must_match() -> None:
+    # Три неразобранных ответа подряд — не «устойчиво»: молчащий судья порог не проходит.
+    calls = []
+    for number in range(5):
+        calls += _calls("grounding", True, [True, True, True], f"src/d{number}/a1")
+    for number in range(10):
+        calls += _calls("grounding", False, [None, None, None], f"src/c{number}/a1")
+    result = score(calls)["grounding"]
+    assert result.stable == 5 and result.unparsed == 30
+    assert not result.passed()
+    # Попытки одного вопроса — один вопрос среди подложенных дефектов.
+    same = _calls("refusal", True, [True] * 3, "src/q1/a1") + _calls(
+        "refusal", True, [True] * 3, "src/q1/a2"
+    )
+    assert score(same)["refusal"].defect_questions == {"src/q1"}
+    # Допуск — только по проверке той же модели с той же добавкой.
+    clean = [
+        {**call, "judge_model": "m", "judge_extra": {}}
+        for number in range(5)
+        for call in _calls("grounding", True, [True] * 3, f"s/d{number}/a1")
+    ] + [
+        {**call, "judge_model": "m", "judge_extra": {}}
+        for number in range(10)
+        for call in _calls("grounding", False, [False] * 3, f"s/c{number}/a1")
+    ]
+    assert passed_criteria(clean, {"judge_model": "m", "judge_extra": {}}) == ["grounding"]
+    assert passed_criteria(clean, {"judge_model": "other", "judge_extra": {}}) == []
+
+
+def test_bad_provider_reply_does_not_break_the_run() -> None:
+    def broken(*_: Any) -> Any:
+        return 200, {"choices": [{"message": None, "finish_reason": "stop"}]}
+
+    verdict = Judge("http://j", "", "m", broken).ask(_item(), BY_NAME["grounding"])
+    assert verdict.defect is None
+
+    def raising(*_: Any) -> Any:
+        raise RuntimeError("сеть")
+
+    judge = Judge("http://j", "", "m", raising)
+    calls = ask_all([(_item(), BY_NAME["grounding"], {"repeat": 1})] * 3, judge)
+    assert len(calls) == 3 and all(call["verdict"] is None for call in calls)
+    assert calls[0]["problem"] == "ошибка вызова: RuntimeError"
+    assert calls[0]["judge_model"] == "m"
+
+
+def test_number_is_replaced_only_when_it_is_whole_in_materials() -> None:
+    # «5» внутри «350» — не число из материалов.
+    assert _other_number("Работают 5 экскаваторов.", "норма 350 ч") is None
+    changed = _other_number("Простой 1,5 ч.", "простой 1.5 ч")
+    assert changed == "Простой 8,5 ч."
+
+
+def test_service_model_key_goes_only_with_its_address() -> None:
+    env = {"JUDGE_MODEL": "j", "MODEL_BASE_URL": "http://svc", "MODEL_API_KEY": "svc-key"}
+    assert _judge(env, lambda *_: (200, {})).api_key == "svc-key"
+    other = _judge({**env, "JUDGE_BASE_URL": "http://other"}, lambda *_: (200, {}))
+    assert other.base_url == "http://other" and other.api_key == ""
