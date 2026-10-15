@@ -134,7 +134,9 @@ def rejudge(line: dict[str, Any]) -> dict[str, Any]:
     судится тем же правилом, что новый."""
     response = line.get("response")
     if line.get("status") != 200 or not isinstance(response, dict):
-        return line
+        # Сервис не ответил — попытка не прошла по обоим правилам и остаётся в знаменателе.
+        verdict = {"passed": bool(line.get("passed")), "leak": bool(line.get("leak"))}
+        return {**line, "task_rule": {**verdict, "differs": []}}
     question = parse(line["question"], 0, {})
     answer = str(response.get("answer") or "")
     pending = response.get("pending_action")

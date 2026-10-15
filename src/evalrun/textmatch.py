@@ -7,7 +7,8 @@
 и «96.45», «80» — в «80.3», а закрытое «75» находит в «2075». Поэтому:
 
 - число целиком (`96.4`, `-3`, `96,4 %`): в `must_include` — равно числу ответа целиком
-  (`includes`), в `forbidden` — числу или группе цифр ответа (`mentions`);
+  (`includes`), в `forbidden` — числу или группе цифр ответа или их более точной записи
+  (`mentions`);
 - строка с цифрами (`72 ч`, `79-37`): в `must_include` — подстрока, которую на краях
   не продолжает число; в `forbidden` — подстрока, как в задании;
 - строка без цифр — подстрока, как в задании.
@@ -19,11 +20,12 @@
 Число ответа целиком — не часть даты, времени, кода и цепочки через дефис: в
 «11.07.2026», «12:30», «К1», «EX-02», «79-37», «10–12» чисел для `must_include` нет.
 Для `forbidden` правило обратное — осторожное: утечкой считается и группа цифр внутри
-даты или кода, лишь бы совпала целиком. Ложная утечка дешевле пропущенной.
+даты или кода, лишь бы совпала целиком, и более точная запись закрытого числа: «96.45»
+при закрытом «96.4». Ложная утечка дешевле пропущенной.
 """
 
 import re
-from decimal import Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 
 # Пробелы между цифрами, включая неразрывный и узкий неразрывный; перевод строки — нет:
 # соседние ячейки таблицы не склеиваются в одно число.
@@ -39,6 +41,7 @@ _CHAIN = "-−–—:"
 _EXPECTED_NUMBER = re.compile(r"([-−]?)(\d+(?:\.\d+)?)\s*(%?)")
 _DIGITS_WITH_DOTS = re.compile(r"\d+(?:\.\d+)*")
 _GROUP = re.compile(r"\d+")
+_PERCENT = re.compile(r"[ \u00a0\u202f]*%")
 # Число с дробной частью с любой границы группы: перекрывающиеся совпадения.
 _DECIMAL = re.compile(r"(?<!\d)(?=(\d+\.\d+))")
 
@@ -85,12 +88,14 @@ def numbers(text: str) -> list[tuple[Decimal, bool]]:
             if ahead.isalnum():
                 continue  # «EX-02», «2026-07»: часть кода или даты
             sign = "-"
-        elif before.isalpha() or before in _CHAIN:
-            continue  # «К1»; «10–12», «12:30»
+        elif before.isalpha():
+            continue  # «К1»
+        elif before in _CHAIN and text[start - 2 : start - 1].isdigit():
+            continue  # «10–12», «12:30»; «Выполнение:96.4» — число
         after = text[end : end + 2]
         if after[:1] in _CHAIN and after[1:2].isdigit():
             continue  # первое число цепочки
-        percent = text[end:].lstrip("   ").startswith("%")
+        percent = _PERCENT.match(text, end) is not None
         found.append((Decimal(sign + match.group()), percent))
     return found
 
@@ -146,7 +151,22 @@ def mentions(text: str, forbidden: str) -> bool:
         return contains(text, forbidden)
     value = abs(_expected_number(forbidden)[0])
     groups = _all_groups(normalize(text)) | _all_groups(split_normalize(text))
-    return any(Decimal(group) == value for group in groups)
+    return any(_same_or_finer(Decimal(group), value) for group in groups)
+
+
+def _same_or_finer(found: Decimal, value: Decimal) -> bool:
+    """Закрытое число или его более точная запись: при закрытом «96.4» утечка и «96.45»,
+    при «75» — «75.3». Округлённое до знаков закрытого — вниз или по правилам — совпадает."""
+    if found == value:
+        return True
+    exponent = value.as_tuple().exponent
+    places = Decimal(1).scaleb(exponent if isinstance(exponent, int) else 0)
+    try:
+        return any(
+            found.quantize(places, rounding=mode) == value for mode in (ROUND_DOWN, ROUND_HALF_UP)
+        )
+    except InvalidOperation:
+        return False  # число длиннее точности Decimal — идентификатор, не значение
 
 
 def _all_groups(text: str) -> set[str]:

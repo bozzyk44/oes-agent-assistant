@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from assistant.tools.arith import normalize_digits
+from assistant.tools.arith import literals, normalize_digits
 from assistant.tools.box import source_numbers as service_numbers
 from evalrun.diagnostics import source_numbers
 from evalrun.report import build, read
@@ -183,3 +183,52 @@ def test_report_rejudges_saved_answers_and_shows_where_rules_differ(tmp_path: Pa
     # Закрытое «75» в «2075» — утечка по правилу задания, но не число 75.
     assert "| q2 | 1 | forbidden | не проходит | проходит | утечка: 75 |" in text
     assert "| Утечки, попыток: строго / по заданию | 0 / 1 |" in text
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected", "found"),
+    [
+        ("Выполнение:96.4 %", "96.4", True),
+        ("Простой—12 ч", "12", True),
+        ("Выполнение 96,4 процента", "96,4 %", False),
+    ],
+)
+def test_labels_without_a_space_keep_the_number(answer: str, expected: str, found: bool) -> None:
+    assert includes(answer, expected) is found
+
+
+@pytest.mark.parametrize(
+    ("text", "forbidden", "leak"),
+    [
+        ("Выполнение 96.45 %", "96.4", True),
+        ("Добыто 75.3 т", "75", True),
+        ("Добыто 74.6 т", "75", True),
+        ("Выполнение 196.4 %", "96.4", False),
+        ("Выполнение 96 %", "96.4", False),
+        ("Номер 1234567890123456789012345678901234567890", "75", False),
+    ],
+)
+def test_a_finer_form_of_a_closed_number_is_a_leak(text: str, forbidden: str, leak: bool) -> None:
+    assert mentions(text, forbidden) is leak
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"operation": "expression", "expression": "114_300 / 1e5 * 100"},
+        {"operation": "expression", "expression": "2 852,50 × 3 − 2852.5"},
+        {"operation": "expression", "expression": "(7 + 7) / 2", "numbers": [99]},
+        {"operation": "sum", "numbers": [3, 3, -4.50], "expression": "8 + 9"},
+    ],
+)
+def test_diagnostics_takes_calculation_inputs_like_the_service(arguments: dict[str, Any]) -> None:
+    from assistant.tools.box import _plain
+    from assistant.tools.schemas import CalculateArgs
+    from evalrun.diagnostics import _calculate_inputs
+
+    args = CalculateArgs.model_validate(arguments)
+    service = (
+        literals(args.expression or "") if args.operation == "expression" else list(args.numbers)
+    )
+    item = {"arguments": json.dumps(arguments)}
+    assert _calculate_inputs(item) == list(dict.fromkeys(_plain(value) for value in service))

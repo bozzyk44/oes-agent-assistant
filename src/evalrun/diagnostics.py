@@ -5,12 +5,13 @@
 Имена инструментов — из контракта задания и схем сервиса; содержимого набора здесь нет.
 """
 
+import ast
 import json
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from evalrun.textmatch import normalize
+from evalrun.textmatch import normalize, split_normalize
 
 SEARCH = "search_documents"
 CALCULATE = "calculate"
@@ -35,9 +36,10 @@ def _tool_calls(record: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _plain(number: str) -> str:
-    """Число как в тексте: без лишних нулей и без экспоненты — «2852.50» и «2852.5» одно."""
+    """Число как в тексте: без знака, без лишних нулей и без экспоненты — «2852.50»
+    и «2852.5» одно."""
     try:
-        return format(Decimal(number).normalize(), "f")
+        return format(abs(Decimal(number)).normalize(), "f")
     except InvalidOperation:
         return number
 
@@ -51,6 +53,10 @@ def source_numbers(text: str) -> set[str]:
     return {_plain(item) for item in _NUMBER.findall(text) + _DIGITS.findall(text)}
 
 
+def _whole(text: str) -> set[str]:
+    return {_plain(item) for item in _NUMBER.findall(split_normalize(text))}
+
+
 def _calculate_inputs(item: dict[str, Any]) -> list[str]:
     """Числа, которые модель подала в расчёт: из `numbers` и `expression`."""
     try:
@@ -61,9 +67,30 @@ def _calculate_inputs(item: dict[str, Any]) -> list[str]:
         return []
     # Каждое значение — отдельно: нормализация убирает пробел между цифрами, и склеенный
     # через пробел список чисел превратился бы в одно число.
-    values = [str(value) for value in arguments.get("numbers") or []]
-    values.append(str(arguments.get("expression") or ""))
-    return [_plain(n) for value in values for n in _NUMBER.findall(normalize(value))]
+    # Как у сервиса: у выражения — его числа из разбора, иначе — список; повтор — один вход.
+    if arguments.get("operation") == "expression":
+        found = _literals(str(arguments.get("expression") or ""))
+    else:
+        found = [str(value) for value in arguments.get("numbers") or []]
+    return list(dict.fromkeys(_plain(number) for number in found))
+
+
+def _literals(expression: str) -> list[str]:
+    """Числа выражения тем же разбором, что у расчёта в сервисе: `1e5` и `114_300` — одно
+    число каждое. Не разбирается — входов нет: сервис такой расчёт не выполнил."""
+    prepared = expression.replace("×", "*").replace("÷", "/").replace("−", "-")
+    prepared = re.sub(r"(?<=\d),(?=\d)", ".", re.sub(r"(?<=\d)[ \u00a0\u202f](?=\d)", "", prepared))
+    try:
+        tree = ast.parse(prepared.strip(), mode="eval")
+    except SyntaxError, ValueError:
+        return []
+    return [
+        str(node.value) if isinstance(node.value, int) else ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, int | float)
+        and not isinstance(node.value, bool)
+    ]
 
 
 def diagnose(
@@ -80,6 +107,9 @@ def diagnose(
     # Опоры — сообщение пользователя и результаты `ok` в порядке хода, как у сервиса:
     # вход расчёта сверяется с тем, что было до него, включая прежние расчёты.
     sources = source_numbers(question_text)
+    # Опора чисел ответа — по всем результатам `ok` и при нормализации строгого сравнения:
+    # нормализация задания склеивает «14.09.2026 83.8» в одно число.
+    said = source_numbers(question_text) | _whole(question_text)
     inputs: list[str] = []
     inputs_grounded: list[str] = []
     for item in executed:
@@ -88,9 +118,11 @@ def diagnose(
             inputs += mine
             inputs_grounded += [n for n in mine if n in sources]
         if item.get("status") == "ok":
-            sources |= source_numbers(str(item.get("result", "")))
-    numbers = [_plain(n) for n in _NUMBER.findall(normalize(answer))]
-    grounded = [n for n in numbers if n in sources]
+            result = str(item.get("result", ""))
+            sources |= source_numbers(result)
+            said |= source_numbers(result) | _whole(result)
+    numbers = [_plain(n) for n in _NUMBER.findall(split_normalize(answer))]
+    grounded = [n for n in numbers if n in said]
     calls_in_text = sum(
         1
         for call in record.get("calls", [])

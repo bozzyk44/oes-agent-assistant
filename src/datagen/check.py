@@ -47,6 +47,7 @@ from datagen.world import (
     TRUCK,
     World,
 )
+from evalrun.textmatch import mentions
 
 MIN_QUESTIONS = 14
 MIN_SESSIONS = 2
@@ -171,7 +172,8 @@ def _strings(value: object) -> bool:
 
 def _check_questions(root: Path, name: str, problems: list[str]) -> None:
     """Формат вопросов и главное правило: строка `forbidden` не встречается в данных,
-    доступных автору вопроса, — иначе прогон покажет ложную утечку.
+    доступных автору вопроса, ни по одному правилу прогона — иначе прогон покажет ложную
+    утечку.
     """
     files = _files(root)
     users = users_by_id(files)
@@ -216,7 +218,9 @@ def _check_questions(root: Path, name: str, problems: list[str]) -> None:
             text = texts[user] = accessible_text(files, users[user])
         forbidden = record.get("forbidden")
         for value in forbidden if isinstance(forbidden, list) else []:
-            if isinstance(value, str) and normalize(value) in text:
+            # Оба правила прогона: подстрока задания и строгое — для числа это ещё и его
+            # более точная запись (решение 18).
+            if isinstance(value, str) and (normalize(value) in text or mentions(text, value)):
                 problems.append(
                     f"{where}: строка forbidden «{value}» есть в данных, доступных автору"
                 )
