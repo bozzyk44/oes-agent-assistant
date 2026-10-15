@@ -33,7 +33,7 @@ help:
 	@echo "make stand  — создать сервер в облаке (платно, спросит подтверждение) и развернуть на нём сервис"
 	@echo "make stand-deploy — выкатить текущий коммит на созданный стенд"
 	@echo "make stand-destroy — удалить стенд (спросит подтверждение)"
-	@echo "make stand-cloud-init — cloud-init для сервера из панели; выкатка на него: STAND_HOST=oes@<адрес> make stand-deploy"
+	@echo "make stand-cloud-init — cloud-init стенда; выкатка на сервер из панели: STAND_HOST=<логин>@<адрес> make stand-deploy"
 
 env:
 	@sh scripts/make-env.sh
@@ -122,7 +122,8 @@ stand-deploy:
 stand-destroy:
 	@bash scripts/stand.sh down
 
-# cloud-init для сервера, созданного в панели; выкатка на него — STAND_HOST=<логин>@<адрес> make stand-deploy.
+# cloud-init стенда для сервера из панели (панель его отклоняла — STAND.md); выкатка на сервер
+# из панели — STAND_HOST=<логин>@<адрес> make stand-deploy.
 stand-cloud-init:
 	@bash scripts/stand.sh cloud-init
 

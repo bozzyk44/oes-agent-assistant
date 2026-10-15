@@ -7,25 +7,26 @@ set -eu
 
 user="$1"
 
-# Подкачка: на сервере 4 ГБ памяти.
-if [ ! -f /swapfile ]; then
-    fallocate -l 1G /swapfile
+# Подкачка: на сервере 4 ГБ памяти. Каждый шаг проверяется отдельно: прерванный запуск
+# повтор доделывает. Скрипт читается из stdin, поэтому у команд — </dev/null.
+if ! swapon --show=NAME --noheadings | grep -qx /swapfile; then
+    [ -f /swapfile ] || fallocate -l 1G /swapfile
     chmod 600 /swapfile
     mkswap /swapfile >/dev/null
     swapon /swapfile
-    echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
+grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 
 # Пакеты — с ожиданием блокировки и повторами: при первом запуске менеджер пакетов занят
 # фоновым обновлением системы.
 export DEBIAN_FRONTEND=noninteractive
 attempt=1
-until apt-get -o DPkg::Lock::Timeout=300 update -q >/dev/null \
-    && apt-get -o DPkg::Lock::Timeout=300 install -y -q docker.io docker-compose-v2 make git >/dev/null; do
+until apt-get -o DPkg::Lock::Timeout=300 update -q >/dev/null </dev/null \
+    && apt-get -o DPkg::Lock::Timeout=300 install -y -q docker.io docker-compose-v2 make git >/dev/null </dev/null; do
     [ "$attempt" -ge 6 ] && { echo "stand: пакеты не поставились" >&2; exit 1; }
     attempt=$((attempt + 1))
     sleep 20
 done
-systemctl enable --now docker
+systemctl enable --now docker </dev/null
 usermod -aG docker "$user"
 echo "stand: Docker поставлен"

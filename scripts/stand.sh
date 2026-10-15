@@ -7,7 +7,9 @@
 #   scripts/stand.sh cloud-init   напечатать cloud-init для сервера, созданного в панели
 #
 # STAND_HOST=<логин>@<адрес> — выкатка на сервер, созданный не Terraform, а вручную,
-# например бесплатный сервер из панели Cloud.ru: тогда адрес не берётся из Terraform.
+# например сервер из панели Cloud.ru: тогда адрес не берётся из Terraform. Группу
+# безопасности такого сервера сценарий не знает, поэтому порт сервиса публикуется только
+# на 127.0.0.1 сервера — проверка через SSH-туннель; наружу — только с STAND_PUBLISH=1.
 #
 # На сервер уходит закоммиченный код (`git archive`, вместе с data/) и из локального .env —
 # только настройки модели и цены. Пароли базы и TOIR_TOKEN сервер создаёт себе сам из
@@ -33,6 +35,7 @@ die() { echo "stand: $*" >&2; exit 1; }
 host() {
     local ip
     if [[ -n "${STAND_HOST:-}" ]]; then
+        [[ "$STAND_HOST" == ?*@?* ]] || die "STAND_HOST — в виде <логин>@<адрес>"
         echo "$STAND_HOST"
         return
     fi
@@ -48,6 +51,8 @@ identity() {
     if [[ -z "$pub" && -f "$env_file" ]]; then
         pub="$(grep -E '^STAND_SSH_PUBLIC_KEY_FILE=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
     fi
+    # Как в tf.sh: без \r и обрамляющих кавычек.
+    pub="${pub%$'\r'}"; pub="${pub#\"}"; pub="${pub%\"}"; pub="${pub#\'}"; pub="${pub%\'}"
     pub="${pub:-$HOME/.ssh/id_ed25519.pub}"
     pub="${pub/#\~/$HOME}"
     echo "${pub%.pub}"
@@ -109,7 +114,7 @@ deploy() {
     mkdir -p "$state"
     wait_ready
     # Сервер из панели cloud-init стенда не получил: Docker и подкачка ставятся здесь.
-    if ! remote 'command -v docker >/dev/null'; then
+    if ! remote 'docker compose version >/dev/null 2>&1'; then
         echo "stand: на сервере нет Docker — ставлю"
         remote "sudo sh -s -- ${target%@*}" < "$root/scripts/stand-bootstrap.sh"
     fi
@@ -124,8 +129,17 @@ deploy() {
     model_env | remote "umask 077 && mkdir -p $remote_home && cat > $remote_home/model.env"
     git -C "$root" archive HEAD \
         | remote "rm -rf $remote_home/app.new && mkdir -p $remote_home/app.new && tar -x -C $remote_home/app.new"
-    remote "bash -s -- $remote_home $sha" < "$root/scripts/stand-remote.sh"
-    echo "stand: готово. Сервис слушает порт на сервере; снаружи он открыт, только если задан TF_VAR_service_cidr"
+    # Порт наружу — только там, где группу безопасности создаёт этот репозиторий.
+    local bind=127.0.0.1
+    if [[ -z "${STAND_HOST:-}" || "${STAND_PUBLISH:-}" == 1 ]]; then
+        bind=0.0.0.0
+    fi
+    remote "bash -s -- $remote_home $sha $bind" < "$root/scripts/stand-remote.sh"
+    if [[ "$bind" == 127.0.0.1 ]]; then
+        echo "stand: готово. Порт сервиса — только на 127.0.0.1 сервера: ssh -L 8000:127.0.0.1:8000 $target"
+    else
+        echo "stand: готово. Порт сервиса опубликован на сервере; снаружи его пропускает только группа безопасности (TF_VAR_service_cidr)"
+    fi
 }
 
 case "${1:-}" in
