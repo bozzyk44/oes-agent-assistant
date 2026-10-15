@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from opentelemetry import metrics, trace
+from opentelemetry.sdk._logs import LoggingHandler
 from opentelemetry.sdk.trace.sampling import (
     Decision,
     ParentBased,
@@ -36,27 +37,39 @@ _meter = metrics.get_meter(_SCOPE)
 token_usage = _meter.create_histogram(
     "gen_ai.client.token.usage", unit="{token}", description="Токены одного вызова модели"
 )
+# Границы корзин — из соглашений: длительность в секундах, от 10 мс до 82 с.
 operation_duration = _meter.create_histogram(
-    "gen_ai.client.operation.duration", unit="s", description="Длительность вызова модели"
+    "gen_ai.client.operation.duration",
+    unit="s",
+    description="Длительность вызова модели",
+    explicit_bucket_boundaries_advisory=[0.01 * 2**power for power in range(14)],
 )
 turns = _meter.create_counter("assistant.turns", unit="{turn}", description="Ходы по исходу")
 
 log = logging.getLogger(__name__)
+_enabled = False
+# Свои сообщения экспортёров — только в обычный журнал: иначе отказ приёмника порождал бы
+# записи об отказе, которые снова уходят в тот же приёмник.
+_LOCAL_ONLY = ("opentelemetry", "urllib3")
 
 
 def setup(environ: Mapping[str, str]) -> bool:
     """Включает экспорт, если задан адрес приёмника. `True` — включён. Вызывается один раз
     при старте процесса: глобальные провайдеры OpenTelemetry второй раз не ставятся.
     """
+    global _enabled
     endpoint = environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip().rstrip("/")
     if not endpoint:
         return False
+    if _enabled:
+        # Повторный вызов в том же процессе — второй обработчик журнала дублировал бы записи.
+        return True
 
     from opentelemetry._logs import set_logger_provider
     from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
     from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+    from opentelemetry.sdk._logs import LoggerProvider
     from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
@@ -73,12 +86,37 @@ def setup(environ: Mapping[str, str]) -> bool:
     logs = LoggerProvider(resource=resource)
     logs.add_log_record_processor(BatchLogRecordProcessor(OTLPLogExporter(f"{endpoint}/v1/logs")))
     set_logger_provider(logs)
-    # Журнал сервиса уходит и в приёмник; в журнал секреты не пишутся — это проверяют тесты.
-    # Записи с INFO — только от сервиса: итог каждого хода связан с его трассой.
-    logging.getLogger().addHandler(LoggingHandler(level=logging.INFO, logger_provider=logs))
+    # Журнал сервиса уходит и в приёмник — без трассировки исключений: в их тексте бывают
+    # параметры запросов к базе и тело ответа провайдера. Записи с INFO — только от сервиса:
+    # итог каждого хода связан с его трассой.
+    logging.getLogger().addHandler(_TextlessHandler(level=logging.INFO, logger_provider=logs))
     logging.getLogger("assistant").setLevel(logging.INFO)
+    _enabled = True
     log.info("телеметрия: экспорт по OTLP включён")
     return True
+
+
+class _TextlessHandler(LoggingHandler):
+    """Запись журнала для приёмника: сообщение и тип исключения, без его текста и стека.
+    Запись копируется: обычный журнал процесса трассировку сохраняет.
+
+    `LoggingHandler` из SDK помечен устаревшим в пользу пакета
+    opentelemetry-instrumentation-logging; переход — когда журнал OpenTelemetry станет
+    стабильным, ради одного обработчика зависимость не добавляется."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.name.startswith(_LOCAL_ONLY):
+            return
+        if record.exc_info or record.stack_info:
+            copy = logging.makeLogRecord(record.__dict__)
+            error = record.exc_info[0] if record.exc_info else None
+            copy.msg = f"{record.getMessage()} [{error.__name__}]" if error else record.getMessage()
+            copy.args = None
+            copy.exc_info = None
+            copy.exc_text = None
+            copy.stack_info = None
+            record = copy
+        super().emit(record)
 
 
 class _SkipReadiness(Sampler):
@@ -106,20 +144,31 @@ class _SkipReadiness(Sampler):
 
 @contextmanager
 def span(
-    name: str, attributes: Mapping[str, Any] | None = None, kind: SpanKind = SpanKind.INTERNAL
+    name: str,
+    attributes: Mapping[str, Any] | None = None,
+    kind: SpanKind = SpanKind.INTERNAL,
+    expected: tuple[type[BaseException], ...] = (),
 ) -> Iterator[Span]:
-    """Спан с атрибутами; исключение помечает его ошибкой и уходит дальше. Пустые значения
-    не пишутся: у OpenTelemetry нет атрибута «нет значения».
+    """Спан с атрибутами. Исключение уходит дальше и помечает спан ошибкой — кроме
+    `expected`: ожидаемый исход вроде «сессия занята» ошибкой не считается, тип пишется
+    атрибутом. Пустые значения не пишутся: у OpenTelemetry нет атрибута «нет значения».
     """
     with tracer.start_as_current_span(
-        name, kind=kind, attributes=_clean(attributes or {}), record_exception=False
+        name,
+        kind=kind,
+        attributes=_clean(attributes or {}),
+        record_exception=False,
+        set_status_on_exception=False,
     ) as current:
         try:
             yield current
         except Exception as error:
             # Тип ошибки, а не её текст: в тексте исключения может оказаться что угодно.
-            current.set_status(Status(StatusCode.ERROR, type(error).__name__))
-            current.set_attribute("error.type", type(error).__name__)
+            if isinstance(error, expected):
+                current.set_attribute("assistant.exception", type(error).__name__)
+            else:
+                current.set_attribute("error.type", type(error).__name__)
+                current.set_status(Status(StatusCode.ERROR, type(error).__name__))
             raise
 
 

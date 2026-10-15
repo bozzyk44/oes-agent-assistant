@@ -3,6 +3,7 @@
 """
 
 import json
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -33,13 +34,20 @@ _EXPORTER = InMemorySpanExporter()
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _provider() -> None:
+def _provider() -> Iterator[None]:
     # Глобальный провайдер ставится один раз на процесс; трассировщик модуля телеметрии —
-    # заместитель, который начинает писать в него после установки.
-    if not isinstance(trace.get_tracer_provider(), TracerProvider):
+    # заместитель, который начинает писать в него после установки. Чужой провайдер, если
+    # его поставил кто-то раньше, сделал бы тесты трасс пустыми — это ошибка набора тестов.
+    current = trace.get_tracer_provider()
+    if not isinstance(current, TracerProvider):
         provider = TracerProvider()
         provider.add_span_processor(SimpleSpanProcessor(_EXPORTER))
         trace.set_tracer_provider(provider)
+    elif not getattr(current, "_test_exporter", False):
+        pytest.fail("провайдер трасс уже поставлен не этим модулем")
+    trace.get_tracer_provider()._test_exporter = True  # type: ignore[attr-defined]
+    yield
+    _EXPORTER.clear()
 
 
 @pytest.fixture
@@ -130,3 +138,62 @@ def test_readiness_checks_are_not_traced() -> None:
     by_path = sampler.should_sample(None, 1, "GET", attributes={"url.path": "/healthz"})
     assert by_path.decision is Decision.DROP
     assert sampler.should_sample(None, 1, "POST /turn").decision is Decision.RECORD_AND_SAMPLE
+
+
+def test_span_marks_only_unexpected_exceptions_as_errors(spans: InMemorySpanExporter) -> None:
+    from opentelemetry.trace import StatusCode
+
+    with pytest.raises(KeyError), telemetry.span("expected", expected=(KeyError,)):
+        raise KeyError("сессия занята")
+    with pytest.raises(ValueError), telemetry.span("unexpected", expected=(KeyError,)):
+        raise ValueError("текст ошибки")
+    finished = {item.name: item for item in spans.get_finished_spans()}
+    assert finished["expected"].status.status_code is StatusCode.UNSET
+    assert (finished["expected"].attributes or {})["assistant.exception"] == "KeyError"
+    assert finished["unexpected"].status.status_code is StatusCode.ERROR
+    assert (finished["unexpected"].attributes or {})["error.type"] == "ValueError"
+    assert "текст ошибки" not in str(finished["unexpected"].status.description)
+
+
+def test_log_records_leave_without_exception_text() -> None:
+    import logging
+
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogRecordProcessor
+
+    from assistant.telemetry import _TextlessHandler
+
+    exporter = InMemoryLogRecordExporter()  # type: ignore[no-untyped-call]
+    provider = LoggerProvider()
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    handler = _TextlessHandler(logger_provider=provider)
+    logger = logging.getLogger("assistant.test_telemetry")
+    try:
+        raise RuntimeError("параметры запроса: вопрос пользователя")
+    except RuntimeError:
+        record = logger.makeRecord(
+            logger.name,
+            logging.ERROR,
+            __file__,
+            1,
+            "ход %s завершился ошибкой",
+            ("t-1",),
+            sys.exc_info(),
+        )
+    handler.emit(record)
+    handler.emit(
+        logger.makeRecord(
+            "opentelemetry.exporter", logging.WARNING, __file__, 1, "Failed to export", (), None
+        )
+    )
+    (exported,) = exporter.get_finished_logs()
+    exported_record = exported.log_record
+    dump = json.dumps(
+        {"body": exported_record.body, "attributes": dict(exported_record.attributes or {})},
+        ensure_ascii=False,
+        default=str,
+    )
+    assert "ход t-1 завершился ошибкой [RuntimeError]" in dump
+    assert "вопрос пользователя" not in dump
+    # Обычный журнал процесса трассировку сохраняет: запись не изменена.
+    assert record.exc_info is not None

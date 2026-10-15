@@ -226,7 +226,7 @@ def run_turn(runtime: Runtime, user_id: str, session_id: str, message: str) -> F
     """
     turn_id = runtime.new_turn_id()
     attributes = {"assistant.turn.id": turn_id, "session.id": session_id, "user.id": user_id}
-    with telemetry.span("turn", attributes) as current:
+    with telemetry.span("turn", attributes, expected=(SessionBusy,)) as current:
         try:
             finished = _run_turn(runtime, turn_id, user_id, session_id, message)
         except SessionBusy:

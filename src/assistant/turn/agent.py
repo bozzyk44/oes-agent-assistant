@@ -374,27 +374,35 @@ class AgentHandler:
     def _call_model(self, request: ChatRequest) -> ModelReply:
         """Вызов модели спаном по соглашениям OpenTelemetry для генеративного ИИ. Текста входа
         и ответа в спане нет: в нём данные набора, доступные одному пользователю."""
+        # Провайдер — хост сервера модели: протокол у всех OpenAI-совместимый, а сервер —
+        # роутер, облако или локальная модель.
         base = {
             "gen_ai.operation.name": "chat",
-            "gen_ai.provider.name": "openai",
+            "gen_ai.provider.name": self._server or "unknown",
             "gen_ai.request.model": self._model_name,
         }
         attributes = {
             **base,
             "gen_ai.request.max_tokens": self._max_output_tokens,
-            "gen_ai.request.temperature": 0,
             "server.address": self._server,
             "assistant.tool_choice": request.tool_choice,
             "assistant.response_format": request.response_format is not None,
         }
         started = time.monotonic()
         with telemetry.span(
-            f"chat {self._model_name}", attributes, telemetry.SpanKind.CLIENT
+            f"chat {self._model_name}",
+            attributes,
+            telemetry.SpanKind.CLIENT,
+            # Отказ от строгих параметров — не сбой: запрос сразу повторяется без них.
+            expected=(FormatRejected,),
         ) as current:
             try:
                 reply = self._model.complete(request)
-            finally:
-                telemetry.operation_duration.record(time.monotonic() - started, base)
+            except Exception as error:
+                failed = {**base, "error.type": type(error).__name__}
+                telemetry.operation_duration.record(time.monotonic() - started, failed)
+                raise
+            telemetry.operation_duration.record(time.monotonic() - started, base)
             usage = reply.usage
             finish = "length" if reply.truncated else "tool_calls" if reply.tool_calls else "stop"
             telemetry.set_attributes(

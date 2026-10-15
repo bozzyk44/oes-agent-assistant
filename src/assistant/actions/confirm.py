@@ -97,7 +97,9 @@ class Actions:
     def confirm(self, action_id: str, user_id: str) -> str:
         """Подтверждает действие и возвращает `request_id` заявки в ТОиР."""
         with telemetry.span(
-            "action confirm", {"assistant.action.id": action_id, "user.id": user_id}
+            "action confirm",
+            {"assistant.action.id": action_id, "user.id": user_id},
+            expected=(NotFound, Forbidden, Conflict),
         ):
             return self._confirm(action_id, user_id)
 
