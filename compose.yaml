@@ -147,6 +147,42 @@ services:
     mem_limit: 1200m
     restart: unless-stopped
 
+  # Обратный прокси стенда: страница и API по имени из STAND_DOMAIN и по HTTPS, вход по
+  # паролю. Только с профилем proxy: базовый запуск работает без домена и облака. Порты 80 и
+  # 443 нужны Let's Encrypt для проверки домена; снаружи их пропускает группа безопасности.
+  # Сервис и заглушка ТОиР наружу по-прежнему не публикуются — только через прокси.
+  proxy:
+    image: caddy:2.11.4-alpine
+    profiles: ["proxy"]
+    ports:
+      - "${PROXY_HTTP_PORT:-80}:80"
+      - "${PROXY_HTTPS_PORT:-443}:443"
+    environment:
+      STAND_DOMAIN: ${STAND_DOMAIN:-}
+      PROXY_USER: ${PROXY_USER:-demo}
+      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
+    # Хэш пароля считается при старте: в .env лежит сам пароль, а хэш с символами «$»
+    # сломал бы подстановку переменных compose. Из окружения процесса Caddy пароль затем
+    # убирается; в настройках контейнера он остаётся, как и остальные секреты сервиса.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        test -n "$$STAND_DOMAIN" && test -n "$$PROXY_PASSWORD"
+        || { echo "proxy: нужны STAND_DOMAIN и PROXY_PASSWORD" >&2; exit 1; };
+        PROXY_PASSWORD_HASH="$$(caddy hash-password --plaintext "$$PROXY_PASSWORD")" || exit 1;
+        export PROXY_PASSWORD_HASH; unset PROXY_PASSWORD;
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    volumes:
+      - ./infra/proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Сертификаты переживают пересоздание контейнера: иначе каждый запуск — новый запрос
+      # к Let's Encrypt и его лимиты.
+      - proxy-data:/data
+    depends_on:
+      assistant:
+        condition: service_healthy
+    mem_limit: 128m
+    restart: unless-stopped
+
   # Разовые команды: запускаются целями make, в `docker compose up` не участвуют.
 
   datagen:
@@ -185,3 +221,4 @@ services:
 
 volumes:
   pgdata:
+  proxy-data:

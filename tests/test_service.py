@@ -565,7 +565,8 @@ def test_data_transactions_are_opened_only_through_the_bound_helper() -> None:
     # Правило «транзакция с данными — только с привязкой к пользователю» держит не база
     # (у app.actions построчной защиты нет), а то, что в коде сервиса нет другого способа
     # открыть транзакцию. Исключения — проверка готовности и сведения о сборке: обе читают
-    # только служебные записи без данных пользователя — версию схемы и хэш набора.
+    # только служебные записи без данных пользователя — версию схемы и хэш набора; и список
+    # пользователей для страницы: справочник без полномочий и групп, без построчной защиты.
     source = Path(__file__).resolve().parents[1] / "src" / "assistant"
     found = []
     for path in sorted(source.rglob("*.py")):
@@ -575,4 +576,27 @@ def test_data_transactions_are_opened_only_through_the_bound_helper() -> None:
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if ".begin(" in line or ".connect(" in line:
                 found.append(f"{relative}:{number}")
-    assert len(found) == 2 and all(item.startswith("api/app.py:") for item in found), found
+    assert len(found) == 3 and all(item.startswith("api/app.py:") for item in found), found
+
+
+# --- Страница для демонстрации -------------------------------------------------------------
+
+
+def test_page_is_served_without_data_or_rights_logic(service: Service) -> None:
+    reply = service.client.get("/")
+    assert reply.status_code == 200
+    assert reply.headers["content-type"].startswith("text/html")
+    page = reply.text
+    # Всё, что страница показывает, она берёт из API: пользователей в ней нет.
+    for path in ("/users", "/turn", "/actions/", "/turns/", "X-User-ID"):
+        assert path in page
+    users = service.client.get("/users").json()
+    assert users
+    for user in users:
+        assert user["user_id"] not in page
+
+
+def test_users_list_has_no_rights(service: Service) -> None:
+    users = service.client.get("/users").json()
+    assert [user["user_id"] for user in users] == sorted(user["user_id"] for user in users)
+    assert all(set(user) == {"user_id", "name", "position"} for user in users)

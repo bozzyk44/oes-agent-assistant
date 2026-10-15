@@ -5,13 +5,14 @@ import os
 import secrets
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import Engine, text
 
 from assistant import telemetry
@@ -62,6 +63,9 @@ _TURN_RECORD = text(
     " latency_ms, record, created_at from app.turns where turn_id = :turn_id"
 )
 _DATASET = text("select content_hash from app.dataset_version")
+_USERS = text("select user_id, name, position_title from app.users order by user_id")
+# Страница для демонстрации: один файл без сборки, логики прав в нём нет.
+_PAGE = Path(__file__).with_name("page.html")
 _READY = text(
     "select (select version_num from public.alembic_version),"
     " (select count(*) from app.dataset_version)"
@@ -207,6 +211,22 @@ def build_app(
         if not datasets:
             return JSONResponse(status_code=503, content={"status": "набор не загружен"})
         return JSONResponse(content={"status": "ok"})
+
+    @app.get("/", response_class=HTMLResponse)
+    def page() -> HTMLResponse:
+        """Чат для демонстрации. Всё, что он показывает, приходит из маршрутов ниже."""
+        return HTMLResponse(_PAGE.read_text(encoding="utf-8"))
+
+    @app.get("/users")
+    def users() -> JSONResponse:
+        """Список пользователей для выбора на странице. Пользователь в этом сервисе задаётся
+        доверенным заголовком `X-User-ID`, поэтому список прав не открывает: полномочий и
+        групп в нём нет — только идентификатор, ФИО и должность."""
+        with engine.connect() as connection:
+            rows = connection.execute(_USERS).all()
+        return JSONResponse(
+            content=[{"user_id": row[0], "name": row[1], "position": row[2]} for row in rows]
+        )
 
     @app.get("/turns/{turn_id}")
     def turn_record(turn_id: str, user_id: user) -> JSONResponse:

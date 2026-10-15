@@ -29,8 +29,12 @@ sh scripts/make-env.sh </dev/null
 umask 077
 names=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' ../model.env)
 {
-    grep -v -E "^($(printf '%s|' $names SERVICE_BIND | sed 's/|$//'))=" ../.env || true
+    grep -v -E "^($(printf '%s|' $names SERVICE_BIND COMPOSE_PROFILES | sed 's/|$//'))=" ../.env || true
     cat ../model.env
+    # Имя стенда задано — поднимается и обратный прокси.
+    if grep -q '^STAND_DOMAIN=.' ../model.env; then
+        echo "COMPOSE_PROFILES=proxy"
+    fi
     # 0.0.0.0 — только на сервере, где группу безопасности создаёт Terraform этого
     # репозитория; на сервере из панели — 127.0.0.1, проверка через SSH-туннель.
     echo "SERVICE_BIND=$bind"

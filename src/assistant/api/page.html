@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ассистент сотрудника</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #657083; --line: #dde1e8;
+    --accent: #2d6cdf; --ok: #1f8a4c; --warn: #b26a00; --bad: #c0392b; --user: #e8f0fe;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1c2027; --text: #e6e9ef; --muted: #9aa3b2; --line: #2c323c;
+      --accent: #6c9cff; --ok: #4cc283; --warn: #e0a040; --bad: #ef6b5e; --user: #22304a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+           padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0 auto 0 0; }
+  select, button, textarea { font: inherit; color: inherit; }
+  select, textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+                     padding: 6px 8px; }
+  button { border: 1px solid var(--line); background: var(--panel); border-radius: 6px;
+           padding: 6px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  main { max-width: 860px; margin: 0 auto; padding: 16px; }
+  #log { display: flex; flex-direction: column; gap: 12px; }
+  .msg { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+         background: var(--panel); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user { background: var(--user); align-self: flex-end; max-width: 80%; }
+  .meta { margin-top: 8px; font-size: 13px; color: var(--muted); display: flex;
+          flex-wrap: wrap; gap: 6px 12px; white-space: normal; }
+  .badge { font-weight: 600; padding: 1px 8px; border-radius: 10px; border: 1px solid; }
+  .o-answer { color: var(--ok); } .o-action { color: var(--accent); }
+  .o-refusal, .o-no_data { color: var(--warn); }
+  .o-error, .o-budget_exceeded { color: var(--bad); }
+  .action { margin-top: 8px; padding: 8px; border: 1px dashed var(--accent); border-radius: 6px;
+            white-space: normal; }
+  .action .row { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+  form { display: flex; gap: 8px; margin-top: 16px; }
+  textarea { flex: 1; min-height: 44px; resize: vertical; }
+  .note { color: var(--muted); font-size: 13px; }
+  details { margin-top: 6px; } pre { white-space: pre-wrap; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ассистент сотрудника</h1>
+  <label>Пользователь <select id="user"></select></label>
+  <button id="new" type="button">Новый разговор</button>
+</header>
+<main>
+  <p class="note" id="info">Страница для демонстрации: всё, что на ней видно, приходит из API
+    сервиса. Права проверяет сервис по выбранному пользователю.</p>
+  <div id="log"></div>
+  <form id="ask">
+    <textarea id="message" placeholder="Вопрос или просьба оформить заявку" required></textarea>
+    <button class="primary" id="send">Отправить</button>
+  </form>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const log = $("log");
+let session = "";
+
+function newSession() {
+  session = "chat-" + crypto.randomUUID();
+  log.replaceChildren();
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+async function api(method, path, body) {
+  const headers = { "X-User-ID": $("user").value };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetch(path, {
+    method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let data = null;
+  try { data = await response.json(); } catch { data = null; }
+  return { status: response.status, data };
+}
+
+function detail(data) {
+  if (data && typeof data.detail === "string") return data.detail;
+  return data ? JSON.stringify(data) : "нет ответа";
+}
+
+function usageLine(usage) {
+  const cached = usage.cached_input_tokens === null ? "—" : usage.cached_input_tokens;
+  return `вызовов модели ${usage.model_calls} · вход ${usage.input_tokens} (кэш ${cached})` +
+    ` · выход ${usage.output_tokens} · ${usage.latency_ms} мс`;
+}
+
+function renderAction(box, pending) {
+  const block = el("div", "action");
+  block.append(el("div", "", `Заявка в ТОиР: ${JSON.stringify(pending.params)}`));
+  const row = el("div", "row");
+  const confirm = el("button", "primary", "Подтвердить");
+  const reject = el("button", "", "Отклонить");
+  const status = el("span", "note");
+  confirm.type = reject.type = "button";
+  const decide = async (verb) => {
+    // Кнопки гаснут сразу; повтор и без этого не создаёт вторую заявку — это делает сервис.
+    confirm.disabled = reject.disabled = true;
+    const { status: code, data } = await api("POST", `/actions/${pending.action_id}/${verb}`);
+    if (code === 200 && data && data.status === "done") {
+      status.textContent = `Заявка создана: ${data.request_id}`;
+    } else if (code === 200 && data && data.status === "rejected") {
+      status.textContent = "Заявка отклонена";
+    } else {
+      status.textContent = `Ответ ${code}: ${detail(data)}`;
+      if (code >= 500) confirm.disabled = reject.disabled = false;
+    }
+  };
+  confirm.onclick = () => decide("confirm");
+  reject.onclick = () => decide("reject");
+  row.append(confirm, reject, status);
+  block.append(row);
+  box.append(block);
+}
+
+function renderTurn(data) {
+  const box = el("div", "msg", data.answer);
+  const meta = el("div", "meta");
+  meta.append(el("span", `badge o-${data.outcome}`, data.outcome));
+  if (data.citations.length) {
+    meta.append(el("span", "", "цитаты: " + data.citations.map((c) => c.chunk_id).join(", ")));
+  }
+  meta.append(el("span", "", usageLine(data.usage)));
+  box.append(meta);
+  if (data.pending_action) renderAction(box, data.pending_action);
+  const record = el("details");
+  record.append(el("summary", "note", `запись хода ${data.turn_id}`));
+  record.addEventListener("toggle", async () => {
+    if (!record.open || record.dataset.loaded) return;
+    record.dataset.loaded = "1";
+    const { status, data: body } = await api("GET", `/turns/${data.turn_id}`);
+    record.append(el("pre", "", status === 200 ? JSON.stringify(body.record, null, 2)
+                                               : `Ответ ${status}: ${detail(body)}`));
+  });
+  box.append(record);
+  log.append(box);
+}
+
+$("ask").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const message = $("message").value.trim();
+  if (!message) return;
+  log.append(el("div", "msg user", message));
+  $("message").value = "";
+  $("send").disabled = true;
+  const waiting = el("div", "note", "ассистент думает…");
+  log.append(waiting);
+  try {
+    const { status, data } = await api("POST", "/turn", { session_id: session, message });
+    waiting.remove();
+    if (status === 200) renderTurn(data);
+    else log.append(el("div", "msg", `Ответ ${status}: ${detail(data)}`));
+  } catch (error) {
+    waiting.remove();
+    log.append(el("div", "msg", `Сервис недоступен: ${error}`));
+  } finally {
+    $("send").disabled = false;
+  }
+});
+
+$("message").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    $("ask").requestSubmit();
+  }
+});
+$("new").addEventListener("click", newSession);
+// Другой пользователь — другой разговор: история сессии принадлежит автору.
+$("user").addEventListener("change", newSession);
+
+(async () => {
+  const { data } = await api("GET", "/users");
+  for (const user of data || []) {
+    const option = el("option", "", `${user.name} — ${user.position} (${user.user_id})`);
+    option.value = user.user_id;
+    $("user").append(option);
+  }
+  const { data: info } = await api("GET", "/info");
+  if (info && info.model) {
+    $("info").append(el("span", "", ` Модель: ${info.model}.`));
+  }
+  newSession();
+})();
+</script>
+</body>
+</html>

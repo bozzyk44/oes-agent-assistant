@@ -1,0 +1,11 @@
+# Обратный прокси стенда: страница и API ассистента по имени и по HTTPS.
+# Сертификат Let's Encrypt Caddy получает и продлевает сам. Имя, пользователь и хэш пароля —
+# из окружения контейнера; хэш считает команда запуска в compose.yaml из PROXY_PASSWORD.
+# У сервиса нет аутентификации, X-User-ID доверенный, поэтому без пароля прокси не пускает.
+{$STAND_DOMAIN} {
+	basic_auth {
+		{$PROXY_USER} {$PROXY_PASSWORD_HASH}
+	}
+	reverse_proxy assistant:8000
+	header -Server
+}
