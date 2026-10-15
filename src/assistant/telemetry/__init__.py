@@ -51,7 +51,7 @@ _enabled = False
 # В приёмник — только журнал сервиса. Сообщения сторонних библиотек могут нести параметры
 # запросов и тела ответов, а сообщения экспортёров при отказе приёмника порождали бы
 # записи об отказе, которые снова уходят в тот же приёмник.
-_EXPORTED = ("assistant", "toir_stub")
+_EXPORTED = "assistant"
 
 
 def setup(environ: Mapping[str, str]) -> bool:
@@ -106,7 +106,7 @@ class _TextlessHandler(LoggingHandler):
     стабильным, ради одного обработчика зависимость не добавляется."""
 
     def emit(self, record: logging.LogRecord) -> None:
-        if not record.name.startswith(_EXPORTED):
+        if record.name != _EXPORTED and not record.name.startswith(f"{_EXPORTED}."):
             return
         if record.exc_info or record.stack_info:
             copy = logging.makeLogRecord(record.__dict__)

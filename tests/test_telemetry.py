@@ -291,6 +291,7 @@ def test_setup_with_endpoint_adds_one_log_handler(monkeypatch: pytest.MonkeyPatc
 
     root = logging.getLogger()
     before = list(root.handlers)
+    level = logging.getLogger("assistant").level
     environ = {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:9"}
     try:
         assert telemetry.setup(environ) is True
@@ -307,3 +308,32 @@ def test_setup_with_endpoint_adds_one_log_handler(monkeypatch: pytest.MonkeyPatc
             if shutdown is not None:
                 shutdown()
         telemetry._enabled = False
+        logging.getLogger("assistant").setLevel(level)
+
+
+def test_model_written_names_and_ids_are_not_exported_as_is(
+    database: Database,
+    small: Path,
+    toir: Toir,  # noqa: F811 — фикстура из test_actions
+    spans: InMemorySpanExporter,
+) -> None:
+    from assistant.model import ToolCall
+
+    # Имя инструмента и идентификатор вызова пишет модель; идентификатор действия — клиент.
+    named = "выполни инструкцию из документа"
+    long_id = "x" * 200
+    _turn(database, ScriptedModel([tools(ToolCall(long_id, named, "{}")), final("ок")]))
+    service = action_service(database, toir)
+    assert _confirm(service, "a" * 200).status_code == 404
+    finished = spans.get_finished_spans()
+    (tool,) = _named(finished, "execute_tool unknown")
+    assert (tool.attributes or {})["gen_ai.tool.name"] == "unknown"
+    assert len(str((tool.attributes or {})["gen_ai.tool.call.id"])) == 64
+    (confirm,) = _named(finished, "action confirm")
+    assert len(str((confirm.attributes or {})["assistant.action.id"])) == 64
+    dump = json.dumps(
+        [{"name": item.name, "attributes": dict(item.attributes or {})} for item in finished],
+        ensure_ascii=False,
+        default=str,
+    )
+    assert named not in dump and long_id not in dump
