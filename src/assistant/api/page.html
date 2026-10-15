@@ -46,6 +46,13 @@
   textarea { flex: 1; min-height: 44px; resize: vertical; }
   .note { color: var(--muted); font-size: 13px; }
   details { margin-top: 6px; } pre { white-space: pre-wrap; font-size: 12px; }
+  #overview { margin: 0 0 16px; padding: 10px 12px; border: 1px solid var(--line);
+              border-radius: 8px; background: var(--panel); }
+  #overview summary { cursor: pointer; font-weight: 600; }
+  #overview h3 { font-size: 14px; margin: 12px 0 4px; }
+  #overview ul { margin: 0; padding-left: 20px; }
+  .examples { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .examples button { font-size: 13px; text-align: left; }
 </style>
 </head>
 <body>
@@ -57,6 +64,10 @@
 <main>
   <p class="note" id="info">Страница для демонстрации: всё, что на ней видно, приходит из API
     сервиса. Права проверяет сервис по выбранному пользователю.</p>
+  <details id="overview" open>
+    <summary>Что можно спросить</summary>
+    <div id="overview-body" class="note">Загрузка…</div>
+  </details>
   <div id="log"></div>
   <form id="ask">
     <textarea id="message" placeholder="Вопрос или просьба оформить заявку" required></textarea>
@@ -199,9 +210,98 @@ $("message").addEventListener("keydown", (event) => {
     $("ask").requestSubmit();
   }
 });
+const TABLES = { production: "добыча", downtime: "простои", equipment: "оборудование" };
+
+function dmy(iso) {
+  return iso ? iso.split("-").reverse().join(".") : "";
+}
+
+function examples(view) {
+  // Примеры строятся из обзора по правам пользователя и по именам таблиц из контракта
+  // формата: содержимого набора в странице нет.
+  const list = [];
+  const table = (name) => view.kpi.find((item) => item.table === name);
+  const production = table("production");
+  if (production && production.first) {
+    const site = production.sites[0];
+    const period = `с ${dmy(production.first)} по ${dmy(production.last)}`;
+    list.push(`Сколько тонн руды добыто на участке ${site} ${period}?`);
+    list.push(`На сколько процентов выполнен план добычи участка ${site} ${period}?`);
+  }
+  const downtime = table("downtime");
+  if (downtime && downtime.first) {
+    list.push(`Сколько часов простоя было на участке ${downtime.sites[0]}` +
+              ` с ${dmy(downtime.first)} по ${dmy(downtime.last)}?`);
+  }
+  if (table("equipment")) {
+    list.push("Какое оборудование дольше всех работает без планового ремонта?");
+  }
+  for (const doc of view.documents.slice(0, 2)) {
+    list.push(`Что сказано в документе «${doc.title}»?`);
+  }
+  if (view.equipment.length) {
+    list.push(`Оформи заявку на ремонт ${view.equipment[0].equipment_id}:` +
+              " течь в гидросистеме, работает с ограничениями.");
+  }
+  return list;
+}
+
+function renderOverview(view) {
+  const body = $("overview-body");
+  body.replaceChildren();
+  body.className = "";
+  body.append(el("div", "note", `${view.user.name}, ${view.user.position}. ` +
+    "Ниже — только то, что доступно этому пользователю."));
+  body.append(el("h3", "", `Документы (${view.documents.length})`));
+  const docs = el("ul");
+  for (const doc of view.documents) docs.append(el("li", "", `${doc.doc_id} — ${doc.title}`));
+  if (!view.documents.length) docs.append(el("li", "note", "нет доступных документов"));
+  body.append(docs);
+  body.append(el("h3", "", "Данные КХД"));
+  const kpi = el("ul");
+  for (const item of view.kpi) {
+    const period = item.first ? `, данные с ${dmy(item.first)} по ${dmy(item.last)}` : "";
+    kpi.append(el("li", "", `${TABLES[item.table] || item.table}: участки ` +
+                            `${item.sites.join(", ")}${period}`));
+  }
+  if (!view.kpi.length) kpi.append(el("li", "note", "нет доступа к данным КХД"));
+  body.append(kpi);
+  body.append(el("h3", "", "Заявки в ТОиР"));
+  body.append(el("div", "", view.repair_sites.length
+    ? `может оформлять на оборудование участков ${view.repair_sites.join(", ")}` +
+      (view.equipment.length
+        ? `: например, ${view.equipment.map((e) => e.equipment_id).join(", ")}` : "")
+    : "права оформлять заявки нет"));
+  const list = examples(view);
+  if (list.length) {
+    body.append(el("h3", "", "Примеры вопросов"));
+    const box = el("div", "examples");
+    for (const text of list) {
+      const button = el("button", "", text);
+      button.type = "button";
+      button.onclick = () => { $("message").value = text; $("message").focus(); };
+      box.append(button);
+    }
+    body.append(box);
+  }
+}
+
+async function loadOverview() {
+  const body = $("overview-body");
+  body.className = "note";
+  body.textContent = "Загрузка…";
+  try {
+    const { status, data } = await api("GET", "/overview");
+    if (status === 200 && data) renderOverview(data);
+    else body.textContent = `Обзор недоступен: ${status}`;
+  } catch (error) {
+    body.textContent = `Сервис недоступен: ${error}`;
+  }
+}
+
 $("new").addEventListener("click", newSession);
 // Другой пользователь — другой разговор: история сессии принадлежит автору.
-$("user").addEventListener("change", newSession);
+$("user").addEventListener("change", () => { newSession(); loadOverview(); });
 
 (async () => {
   newSession();
@@ -218,6 +318,7 @@ $("user").addEventListener("change", newSession);
       $("user").append(option);
     }
     $("send").disabled = false;
+    loadOverview();
     const { data: info } = await api("GET", "/info");
     if (info && info.model) {
       $("info").append(el("span", "", ` Модель: ${info.model}.`));

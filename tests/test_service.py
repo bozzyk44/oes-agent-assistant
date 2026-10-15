@@ -600,3 +600,53 @@ def test_users_list_has_no_rights(service: Service) -> None:
     users = service.client.get("/users").json()
     assert [user["user_id"] for user in users] == sorted(user["user_id"] for user in users)
     assert all(set(user) == {"user_id", "name", "position"} for user in users)
+
+
+def _visible_documents(database: Database, user: str) -> list[str]:
+    """Действующие документы, видимые группам пользователя, — своим запросом под владельцем."""
+    with database.owner.connect() as connection:
+        rows = connection.execute(
+            text(
+                "select distinct c.doc_id from kb.chunks c"
+                " where c.status = 'active' and c.acl && ("
+                "   select array_agg(group_name) || array['all']"
+                "   from app.user_groups where user_id = :user)"
+                " order by c.doc_id"
+            ),
+            {"user": user},
+        )
+        return [row[0] for row in rows]
+
+
+@pytest.mark.parametrize("user", ["u-eng", "u-k1", "u-hr"])
+def test_overview_follows_the_rights_of_the_user(
+    service: Service, database: Database, user: str
+) -> None:
+    reply = service.client.get("/overview", headers={"X-User-ID": user})
+    assert reply.status_code == 200
+    view = reply.json()
+    assert [doc["doc_id"] for doc in view["documents"]] == _visible_documents(database, user)
+    with database.owner.connect() as connection:
+        kpi = {
+            table: sorted(site for t, site in rows if t == table)
+            for rows in [
+                connection.execute(
+                    text("select table_name, site from app.kpi_grants where user_id = :u"),
+                    {"u": user},
+                ).all()
+            ]
+            for table in {t for t, _ in rows}
+        }
+        repair = sorted(
+            connection.scalars(
+                text("select site from app.repair_grants where user_id = :u"), {"u": user}
+            )
+        )
+    assert {item["table"]: item["sites"] for item in view["kpi"]} == kpi
+    assert view["repair_sites"] == repair
+    assert all(item["site"] in repair for item in view["equipment"])
+
+
+def test_overview_needs_a_known_user(service: Service) -> None:
+    assert service.client.get("/overview").status_code == 401
+    assert service.client.get("/overview", headers={"X-User-ID": "u-nobody"}).status_code == 401

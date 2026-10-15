@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import Engine, text
 
 from assistant import telemetry
+from assistant.access import load_grants, overview
 from assistant.actions.confirm import (
     Actions,
     Conflict,
@@ -228,6 +229,25 @@ def build_app(
             rows = connection.execute(_USERS).all()
         return JSONResponse(
             content=[{"user_id": row[0], "name": row[1], "position": row[2]} for row in rows]
+        )
+
+    @app.get("/overview")
+    def user_overview(user_id: user) -> JSONResponse:
+        """Что пользователь может спросить: документы, данные КХД и заявки — по его правам,
+        через слой доступа. Для страницы: обзор и примеры вопросов."""
+        with transaction(engine, user_id) as connection:
+            grants = load_grants(connection, user_id)
+            if grants is None:
+                raise HTTPException(status_code=401, detail="неизвестный пользователь")
+            found = overview(connection, grants)
+        return JSONResponse(
+            content={
+                "user": {"name": grants.name, "position": grants.position},
+                "documents": found.documents,
+                "kpi": found.kpi,
+                "repair_sites": found.repair_sites,
+                "equipment": found.equipment,
+            }
         )
 
     @app.get("/turns/{turn_id}")
