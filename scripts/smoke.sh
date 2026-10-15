@@ -319,6 +319,92 @@ for pair in "postgres 5432" "toir 8001"; do
     esac
 done
 
+step "заглушка модели: ход предлагает заявку"
+# Заглушка модели — отдельный контейнер из compose.smoke.yaml; сервис пересоздаётся
+# с её адресом. Настоящую модель сценарий не зовёт: ключ в этом файле — метка.
+STUBBED="$COMPOSE -f compose.yaml -f compose.smoke.yaml"
+$STUBBED up --build --detach --wait modelstub assistant
+[ "$($COMPOSE exec -T assistant printenv MODEL_BASE_URL)" = "http://modelstub:8003/v1" ] \
+    || fail "сервис не направлен на заглушку модели"
+# Пользователь с правом на заявку и оборудование его участка — из набора сценария,
+# изнутри загрузчика: набор смонтирован только туда.
+pick=$($COMPOSE run --rm --no-deps -T loader python -c "
+import csv, json
+users = json.load(open('/data/users.json', encoding='utf-8'))
+rows = list(csv.DictReader(open('/data/equipment.csv', encoding='utf-8')))
+for user in users:
+    for row in rows:
+        if row['site'] in user.get('repair_requests', []):
+            print(user['user_id'], row['equipment_id'])
+            raise SystemExit
+raise SystemExit('нет пользователя с правом на заявку')
+") || fail "в наборе сценария нет пары «пользователь — оборудование» для заявки"
+# shellcheck disable=SC2086 — два слова без пробелов внутри: идентификаторы
+set -- $pick
+repair_user=$1 repair_equipment=$2
+# Ход: заглушка вызывает подготовку заявки. Итог вторым шагом — на случай, если ход
+# позовёт модель ещё раз; сейчас после черновика ход завершает код. Номер действия — в вывод.
+action_id=$($COMPOSE exec -T assistant python -c "
+import json, sys, urllib.request as u
+user, equipment = sys.argv[1], sys.argv[2]
+def send(method, url, body, headers=None):
+    request = u.Request(url, data=json.dumps(body).encode(), method=method,
+                        headers={'Content-Type': 'application/json', **(headers or {})})
+    with u.urlopen(request, timeout=30) as reply:
+        return json.load(reply)
+steps = [
+    {'tool_calls': [{'name': 'create_repair_request', 'arguments': {
+        'equipment_id': equipment, 'description': 'проверка сборки: течь', 'priority': 3}}]},
+    {'final': {'answer': 'Черновик заявки готов, подтвердите.', 'outcome': 'action'}},
+]
+send('PUT', 'http://modelstub:8003/script', {'steps': steps})
+reply = send('POST', 'http://127.0.0.1:8000/turn',
+             {'session_id': 'smoke-repair', 'message': 'Оформи заявку на ремонт ' + equipment},
+             {'X-User-ID': user})
+pending = reply.get('pending_action') or {}
+if reply.get('outcome') != 'action' or not pending.get('action_id'):
+    sys.exit('ход не предложил заявку: outcome ' + str(reply.get('outcome')))
+if pending.get('params', {}).get('equipment_id') != equipment:
+    sys.exit('в черновике не то оборудование')
+with u.urlopen('http://modelstub:8003/requests', timeout=5) as stub:
+    # После черновика заявки сервис завершает ход сам: второго вызова модели может не быть.
+    if json.load(stub)['requests'] < 1:
+        sys.exit('ход прошёл не через заглушку модели')
+print(pending['action_id'])
+" "$repair_user" "$repair_equipment") || fail "ход с заглушкой модели не предложил заявку"
+
+step "перезапуск сервиса между предложением и подтверждением"
+$COMPOSE restart assistant >/dev/null
+$STUBBED up --detach --wait assistant
+case "$(fetch http://127.0.0.1:8000/healthz)" in *'"ok"'*) ;; *) fail "сервис не поднялся после перезапуска" ;; esac
+
+step "подтверждение после перезапуска: ровно одна заявка, повтор её не добавляет"
+$COMPOSE exec -T assistant python -c "
+import json, os, sys, urllib.request as u
+action, user, equipment = sys.argv[1], sys.argv[2], sys.argv[3]
+def confirm():
+    request = u.Request('http://127.0.0.1:8000/actions/' + action + '/confirm', data=b'',
+                        method='POST', headers={'X-User-ID': user})
+    with u.urlopen(request, timeout=30) as reply:
+        return reply.status, json.load(reply)
+first, again = confirm(), confirm()
+if first[0] != 200 or first[1].get('status') != 'done' or not first[1].get('request_id'):
+    sys.exit('подтверждение после перезапуска не прошло')
+if again != first:
+    sys.exit('повторное подтверждение вернуло другое')
+request = u.Request(os.environ['TOIR_URL'] + '/requests',
+                    headers={'Authorization': 'Bearer ' + os.environ['TOIR_TOKEN']})
+with u.urlopen(request, timeout=5) as reply:
+    rows = json.load(reply)
+mine = [row for row in rows if row.get('equipment_id') == equipment]
+if len(mine) != 1 or mine[0].get('request_id') != first[1]['request_id']:
+    sys.exit('в заглушке ТОиР не ровно одна заявка на это оборудование или не та, что в ответе')
+" "$action_id" "$repair_user" "$repair_equipment" \
+    || fail "подтверждение заявки не по контракту"
+# Сервис — снова с адресом модели из окружения, заглушка модели остановлена: следующий шаг
+# перезапускает контейнер, а не пересоздаёт его из-за смены настроек.
+$COMPOSE up --detach --wait --remove-orphans
+
 step "перезапуск сервиса"
 $COMPOSE restart assistant >/dev/null
 $COMPOSE up --detach --wait

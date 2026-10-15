@@ -81,7 +81,7 @@
 | `src/toir_stub/`, `src/datagen/`, `src/evalrun/` | Заглушка ТОиР, генератор набора, прогон |
 | `tests/` | Тесты; в образ сервиса не попадают |
 | `scripts/` | `make-env.sh` — создание `.env`; `smoke.sh` — сценарий сборки; `ci-local.sh` — локальный CI; `stand.sh` и `stand-remote.sh` — стенд в облаке |
-| `compose.yaml`, `compose.test.yaml`, `compose.mutants.yaml` | Запуск, окружение тестов, мутанты |
+| `compose.yaml`, `compose.test.yaml`, `compose.mutants.yaml`, `compose.smoke.yaml` | Запуск, окружение тестов, мутанты, заглушка модели для сценария сборки |
 | `data/`, `eval/` | Набор и результаты прогона |
 | `infra/terraform/` | Сервер стенда |
 

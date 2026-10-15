@@ -181,7 +181,8 @@ def test_service_code_has_no_switch_for_mutants() -> None:
 def test_obedient_model_speaks_openai_format() -> None:
     from fastapi.testclient import TestClient
 
-    from tests.mutants.obedient import ObedientModel, http_app
+    from tests.modelserver import http_app
+    from tests.mutants.obedient import ObedientModel
 
     attack = [
         {"tool": "get_document", "arguments": {"ref": "X1"}},

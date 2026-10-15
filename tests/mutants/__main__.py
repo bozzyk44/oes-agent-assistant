@@ -34,7 +34,8 @@ def serve(name: str) -> int:
 def obedient() -> int:
     import uvicorn
 
-    from tests.mutants.obedient import ObedientModel, http_app, load_attacks
+    from tests.modelserver import http_app
+    from tests.mutants.obedient import ObedientModel, load_attacks
 
     questions = Path(os.environ.get("QUESTIONS", "/data/questions.jsonl"))
     model = ObedientModel(load_attacks(questions))
