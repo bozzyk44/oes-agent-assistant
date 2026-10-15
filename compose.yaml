@@ -149,7 +149,7 @@ services:
       # Grafana отдаёт себя с подпути: так её адреса совпадают и с прокси, и локально —
       # http://127.0.0.1:3000/grafana/. Без входа: анонимный пользователь — редактор, а не
       # администратор образа по умолчанию: Explore и дашборды есть, источников данных и
-      # пользователей не добавить.
+      # пользователей не добавить. Вход по паролю выключен целиком: в образе есть admin/admin.
       GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s:%(http_port)s/grafana/"
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
