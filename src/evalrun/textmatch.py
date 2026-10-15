@@ -9,7 +9,7 @@
 - число целиком (`96.4`, `-3`, `96,4 %`): в `must_include` — равно числу ответа целиком
   (`includes`), в `forbidden` — числу или группе цифр ответа или их более точной записи
   (`mentions`);
-- строка с цифрами (`72 ч`, `79-37`): в `must_include` — подстрока, которую на краях
+- строка с цифрами (`72 ч`, `55-10`): в `must_include` — подстрока, которую на краях
   не продолжает число; в `forbidden` — подстрока, как в задании;
 - строка без цифр — подстрока, как в задании.
 
@@ -18,7 +18,7 @@
 в «по 14.09.2026 83.8 ч» получается «14.09.202683.8», и числа 83.8 в ответе уже нет.
 
 Число ответа целиком — не часть даты, времени, кода и цепочки через дефис: в
-«11.07.2026», «12:30», «К1», «EX-02», «79-37», «10–12» чисел для `must_include` нет.
+«11.07.2026», «12:30», «Б7», «ЭК-07», «55-10», «10–12» чисел для `must_include` нет.
 Для `forbidden` правило обратное — осторожное: утечкой считается и группа цифр внутри
 даты или кода, лишь бы совпала целиком, и более точная запись закрытого числа: «96.45»
 при закрытом «96.4». Ложная утечка дешевле пропущенной.
@@ -83,17 +83,17 @@ def numbers(text: str) -> list[tuple[Decimal, bool]]:
             continue  # дата или номер версии
         before = text[start - 1] if start else ""
         sign = ""
-        if before in _MINUS:
+        if before and before in _MINUS:
             ahead = text[start - 2] if start > 1 else ""
             if ahead.isalnum():
-                continue  # «EX-02», «2026-07»: часть кода или даты
+                continue  # «ЭК-07», «2026-07»: часть кода или даты
             sign = "-"
-        elif before.isalpha():
-            continue  # «К1»
-        elif before in _CHAIN and text[start - 2 : start - 1].isdigit():
+        elif before.isalpha():  # пустая строка — не буква: число в начале текста
+            continue  # «Б7»
+        elif before and before in _CHAIN and start > 1 and text[start - 2].isdigit():
             continue  # «10–12», «12:30»; «Выполнение:96.4» — число
         after = text[end : end + 2]
-        if after[:1] in _CHAIN and after[1:2].isdigit():
+        if after[:1] and after[:1] in _CHAIN and after[1:2].isdigit():
             continue  # первое число цепочки
         percent = _PERCENT.match(text, end) is not None
         found.append((Decimal(sign + match.group()), percent))

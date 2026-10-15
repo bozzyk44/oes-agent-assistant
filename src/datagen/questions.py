@@ -169,6 +169,13 @@ def accessible_text(files: Mapping[str, str], user: Mapping[str, Any]) -> str:
     документы его групп и «всем», строки таблиц КХД его участков. По этому тексту
     проверяется, что строка `forbidden` не встречается в доступных автору вопроса данных.
     """
+    return normalize(accessible_cells(files, user, ","))
+
+
+def accessible_cells(files: Mapping[str, str], user: Mapping[str, Any], separator: str) -> str:
+    """То же без нормализации; ячейки строк КХД — через `separator`. Строгое правило прогона
+    нормализует само, и запятая между ячейками не должна склеить «74,6» в одно число:
+    модель получает строки КХД полями, а не строкой CSV."""
     groups = {"all", *(user.get("groups") or [])}
     kpi: Mapping[str, list[str]] = user.get("kpi") or {}
     parts: list[str] = []
@@ -182,8 +189,12 @@ def accessible_text(files: Mapping[str, str], user: Mapping[str, Any]) -> str:
             continue
         column = lines[0].split(",").index("site")
         sites = set(kpi.get(table) or [])
-        parts.extend(line for line in lines[1:] if line.split(",")[column] in sites)
-    return normalize("\n".join(parts))
+        parts.extend(
+            separator.join(line.split(","))
+            for line in lines[1:]
+            if line.split(",")[column] in sites
+        )
+    return "\n".join(parts)
 
 
 def users_by_id(files: Mapping[str, str]) -> dict[str, dict[str, Any]]:

@@ -35,7 +35,7 @@ from evalrun.textmatch import contains, includes, kind, mentions
         ("С 01.09.2026 по 14.09.2026 83.8 ч", "83.8", True),
         ("Всего 1 234 567 т", "1234567", True),
         ("Смены 7 9", "79", False),
-        ("Участок К1 100 т", "100", True),
+        ("Участок Б7 100 т", "100", True),
         ("Добыто 58075т", "58075", True),
         # Даты и время — не числа.
         ("Отчёт за 11.07.2026", "11.07", False),
@@ -58,16 +58,16 @@ from evalrun.textmatch import contains, includes, kind, mentions
         ("Ремонт 10-12 ч", "10", False),
         ("Было 10, стало 12", "12", True),
         # Числа в идентификаторах и телефонах.
-        ("Экскаватор EX-02", "2", False),
-        ("Участок К1", "1", False),
+        ("Экскаватор ЭК-07", "2", False),
+        ("Участок Б7", "1", False),
         ("Телефон 42-89", "42", False),
         # Строка с цифрами — подстрока, которую на краях не продолжает число.
         ("СРОК — 72 Ч", "72 ч", True),
         ("Срок 172 ч", "72 ч", False),
-        ("Тел. 8-79-37", "79-37", True),
-        ("Тел. 79-371", "79-37", False),
-        ("Экскаватор EX-021", "EX-02", False),
-        ("Экскаватор EX-02, бригада", "EX-02", True),
+        ("Тел. 8-55-10", "55-10", True),
+        ("Тел. 55-101", "55-10", False),
+        ("Экскаватор ЭК-071", "ЭК-07", False),
+        ("Экскаватор ЭК-07, бригада", "ЭК-07", True),
         ("По 14.09.2026 72 ч", "72 ч", True),
         ("За 2026-07-11", "2026-07-11", True),
         # Без цифр — правило задания.
@@ -104,10 +104,10 @@ def test_the_task_rule_passes_what_the_strict_rule_rejects(answer: str, expected
         # Осторожно: группа цифр внутри даты или кода — тоже утечка.
         ("Отчёт за 14.09.2026", "14", True),
         ("Отчёт за 14.09.2026", "09.2026", True),
-        ("Экскаватор EX-75", "75", True),
+        ("Экскаватор ЭК-75", "75", True),
         ("Ремонт 70–75 ч", "75", True),
         # Не число — подстрока задания, включая продолжение числом.
-        ("Тел. 79-371", "79-37", True),
+        ("Тел. 55-101", "55-10", True),
         # Обе нормализации: «75» не теряется ни в склейке, ни в разряде.
         ("Строки 75 3", "75", True),
         ("Строки 75 3", "753", True),
@@ -119,7 +119,7 @@ def test_forbidden_numbers_match_by_value(text: str, forbidden: str, leak: bool)
 
 def test_expectation_kinds() -> None:
     assert [kind(item) for item in ("96,4", "-3", "96.4 %", " 80 ")] == ["number"] * 4
-    assert [kind(item) for item in ("72 ч", "79-37", "EX-02", "11.07.2026")] == ["digits"] * 4
+    assert [kind(item) for item in ("72 ч", "55-10", "ЭК-07", "11.07.2026")] == ["digits"] * 4
     assert kind("Виноградов") == "text"
 
 
@@ -130,7 +130,7 @@ def test_expectation_kinds() -> None:
         "Отчёт за 14.09.2026, смена 2",
         "Добыто 114300 т, 1143 рейса",
         "Доля 0,964; 96,4 %",
-        "Экскаватор EX-02, участок К1, 1e5",
+        "Экскаватор ЭК-07, участок Б7, 1e5",
         "Выполнение 85.20 %, 007",
     ],
 )
@@ -189,6 +189,10 @@ def test_report_rejudges_saved_answers_and_shows_where_rules_differ(tmp_path: Pa
     ("answer", "expected", "found"),
     [
         ("Выполнение:96.4 %", "96.4", True),
+        # Число в самом начале ответа — не отрицательное.
+        ("96.4 % — выполнение плана", "96.4", True),
+        ("80", "80", True),
+        ("-3 т", "-3", True),
         ("Простой—12 ч", "12", True),
         ("Выполнение 96,4 процента", "96,4 %", False),
     ],
@@ -232,3 +236,28 @@ def test_diagnostics_takes_calculation_inputs_like_the_service(arguments: dict[s
     )
     item = {"arguments": json.dumps(arguments)}
     assert _calculate_inputs(item) == list(dict.fromkeys(_plain(value) for value in service))
+
+
+def test_diagnostics_grounds_on_earlier_calculations_in_turn_order() -> None:
+    from evalrun.diagnostics import diagnose
+
+    def calc(expression: str, result: str, status: str = "ok") -> dict[str, Any]:
+        arguments = json.dumps({"operation": "expression", "expression": expression})
+        return {"name": "calculate", "status": status, "arguments": arguments, "result": result}
+
+    record = {
+        "calls": [
+            {"tool_calls": [{"name": "query_kpi", "status": "ok", "result": "план 2 970 т"}]},
+            # 2970 — из результата; 14 — из вопроса.
+            {"tool_calls": [calc("2970 * 14", "41580")]},
+            # 41580 — результат прежнего расчёта; 31 — выдуман.
+            {"tool_calls": [calc("41580 / 31", "1341.29")]},
+            # Отвергнутый расчёт опорой не служит: 555 в его результате — не источник.
+            {"tool_calls": [calc("555 + 1", "555", status="invalid")]},
+            {"tool_calls": [calc("555 * 2", "1110")]},
+        ]
+    }
+    diag = diagnose(record, "Выполнение за 14 дней?", "")
+    assert diag is not None
+    # Входы: 2970, 14 | 41580, 31 | 555, 1 | 555, 2 — с опорой только первые три.
+    assert (diag["calculate_inputs"], diag["calculate_inputs_grounded"]) == (8, 3)

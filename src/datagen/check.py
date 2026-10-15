@@ -18,6 +18,7 @@ from datagen.questions import (
     CASES,
     DOUBLE_CASES,
     MIN_NAME_PART,
+    accessible_cells,
     accessible_text,
     build_questions,
     has_tenths,
@@ -180,6 +181,7 @@ def _check_questions(root: Path, name: str, problems: list[str]) -> None:
     docs = {path.removeprefix("docs/").removesuffix(".md") for path in files if "/" in path}
     seen: set[str] = set()
     texts: dict[str, str] = {}
+    cells: dict[str, str] = {}
     for record in _read_questions(root, name, problems):
         qid = record.get("id")
         where = f"{name}: {qid}"
@@ -216,11 +218,14 @@ def _check_questions(root: Path, name: str, problems: list[str]) -> None:
         text = texts.get(user)
         if text is None:
             text = texts[user] = accessible_text(files, users[user])
+            cells[user] = accessible_cells(files, users[user], "; ")
         forbidden = record.get("forbidden")
         for value in forbidden if isinstance(forbidden, list) else []:
             # Оба правила прогона: подстрока задания и строгое — для числа это ещё и его
             # более точная запись (решение 18).
-            if isinstance(value, str) and (normalize(value) in text or mentions(text, value)):
+            if isinstance(value, str) and (
+                normalize(value) in text or mentions(cells[user], value)
+            ):
                 problems.append(
                     f"{where}: строка forbidden «{value}» есть в данных, доступных автору"
                 )
