@@ -103,6 +103,11 @@ deploy() {
     target="$(host)"
     mkdir -p "$state"
     wait_ready
+    # Сервер из панели cloud-init стенда не получил: Docker и подкачка ставятся здесь.
+    if ! remote 'command -v docker >/dev/null'; then
+        echo "stand: на сервере нет Docker — ставлю"
+        remote "sudo sh -s -- ${target%@*}" < "$root/scripts/stand-bootstrap.sh"
+    fi
 
     [[ -z "$(git -C "$root" status --porcelain)" ]] \
         || echo "stand: в рабочей копии есть незакоммиченные изменения — выкатывается коммит без них" >&2
