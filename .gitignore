@@ -26,6 +26,8 @@ crash.*.log
 # Чистая копия коммита для локального CI и временный набор сценария сборки
 .ci/
 .smoke/
+# Ключ хоста стенда: scripts/stand.sh
+.stand/
 
 # Набор для итоговой проверки: make data-holdout
 holdout/
