@@ -76,14 +76,16 @@ wait_ready() {
     remote cloud-init status --wait >/dev/null || die "первая настройка сервера не удалась: cloud-init status --long на сервере"
 }
 
-# Тот же cloud-init, что Terraform передаёт серверу: для вставки в форму создания в панели.
+# Тот же cloud-init, что Terraform передаёт серверу, без комментариев и пустых строк: форма
+# создания в панели отвергает его целиком, без указания причины.
 cloud_init() {
     local pub key
     pub="$(identity).pub"
     [[ -f "$pub" ]] || die "нет публичного ключа $pub; задайте STAND_SSH_PUBLIC_KEY_FILE"
     key="$(tr -d '\n' < "$pub" | sed 's/"/\\"/g')"
     sed -e "s/\${hostname}/oes-stand/" -e "s/\${login}/$login/g" \
-        -e "s|\${ssh_public_key_yaml}|\"$key\"|" "$root/infra/terraform/cloud-init.yaml.tftpl"
+        -e "s|\${ssh_public_key_yaml}|\"$key\"|" "$root/infra/terraform/cloud-init.yaml.tftpl" \
+        | grep -v -E '^[[:space:]]*#[^!c]|^[[:space:]]*#$|^$'
 }
 
 # Настройки модели из локального .env, строками ИМЯ=значение. Файл не исполняется. Каждое имя
