@@ -19,7 +19,6 @@ from assistant.ingest.chunks import split_document
 from datagen.check import check_dataset, check_traps
 from datagen.questions import (
     CASES,
-    KPI_TABLES,
     Question,
     accessible_cells,
     accessible_text,
@@ -27,7 +26,7 @@ from datagen.questions import (
 )
 from datagen.render import render
 from datagen.text import normalize
-from datagen.world import DEFAULT_SEED, HOLDOUT_SEED, SECOND_SEED, World, build_world
+from datagen.world import DEFAULT_SEED, HOLDOUT_SEED, KPI_TABLES, SECOND_SEED, World, build_world
 
 Dataset = tuple[Path, World]
 
