@@ -110,7 +110,8 @@ def make_service(
     config: Settings | None = None,
 ) -> Service:
     clock = Clock()
-    config = config or settings(database_url, model=model)
+    if config is None:
+        config = settings(database_url, model=model)
     runtime = Runtime(
         settings=config,
         engine=engine,

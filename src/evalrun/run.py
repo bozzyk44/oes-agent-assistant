@@ -86,10 +86,16 @@ class Runner:
             return "сервис не отвечает на GET /info — он запущен? (make run)"
         if self.toir.count() is None:
             return "заглушка ТОиР не отвечает на GET /requests — проверьте TOIR_URL и TOIR_TOKEN"
-        # Без адреса модели каждый ход — `outcome: error`: прогон из одних провалов затёр бы
-        # прошлый итог. Старый сервис без поля не останавливает.
-        if "model_base_url" in info and not info["model_base_url"]:
-            return "у сервиса не задан адрес модели — задайте MODEL_BASE_URL в .env и перезапустите"
+        # Без модели каждый ход — `outcome: error`: прогон из одних провалов затёр бы прошлый
+        # итог. Правило «настроена» — у сервиса; сервис без этого поля судится по адресу и имени.
+        configured = info.get("model_configured")
+        if configured is None and "model_base_url" in info:
+            configured = bool(info.get("model_base_url")) and bool(info.get("model"))
+        if configured is False:
+            return (
+                "у сервиса не задана модель — задайте MODEL_BASE_URL и MODEL_NAME в .env"
+                " и перезапустите"
+            )
         return None
 
     def ask(self, question: Question, session: str) -> tuple[int, Any, int]:

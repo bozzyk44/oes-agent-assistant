@@ -281,6 +281,9 @@ def build_app(
                 "prefix_hash": runtime.handler.prefix_hash,
                 "model": model.name,
                 "model_base_url": _public_url(model.base_url),
+                # Без адреса или имени модели каждый ход — `outcome: error`; прогон по этому
+                # полю останавливается до первого хода.
+                "model_configured": model.configured,
                 "sampling": {
                     "temperature": 0,
                     "max_output_tokens": model.max_output_tokens,

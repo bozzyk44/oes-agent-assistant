@@ -131,10 +131,13 @@ def test_get_routes_carry_no_secret(database: Database, small: Path) -> None:
     service = make_service(database.service, database.service_url, handler, config=config)
     turn_id = service.turn("u-eng", new_session(), "Периодичность ремонта?").body["turn_id"]
     headers = {"X-User-ID": "u-eng"}
-    texts = [
-        service.client.get(path, headers=headers).text
+    responses = [
+        service.client.get(path, headers=headers)
         for path in ("/info", f"/turns/{turn_id}", "/overview", "/users")
     ]
+    # Тело ошибки секрета не содержит: проверка имеет смысл только на настоящих ответах.
+    assert [response.status_code for response in responses] == [200] * 4
+    texts = [response.text for response in responses]
     assert all(MODEL_KEY not in text and TOIR_TOKEN not in text for text in texts)
     assert "model.invalid/v1" in texts[0]
 
@@ -638,7 +641,7 @@ def test_info(database: Database, small: Path) -> None:
     service, _ = _service(database, model)
     info = service.client.get("/info").json()
     assert info["prefix_hash"] == PREFIX.hash
-    assert info["model"] == "test-model"
+    assert info["model"] == "test-model" and info["model_configured"] is True
     assert info["dataset_hash"]
 
 
