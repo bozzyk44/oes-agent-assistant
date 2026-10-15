@@ -328,15 +328,20 @@ def _split_digits(text: str) -> str:
     return _COMMA.sub(".", _GROUPED.sub(lambda match: _SPACES.sub("", match.group()), text))
 
 
-def unsourced_numbers(text: str, source: str) -> list[str]:
-    """Числа текста, которых нет в источнике ни целиком, ни группой цифр, — по правилу
-    входов расчёта, без постоянных. Дата сверяется по частям: день, месяц, год."""
-    known = source_numbers(normalize_digits(source)) | source_numbers(_split_digits(source))
+def _mentioned(text: str) -> list[str]:
+    """Числа текста целиком; дата — по частям: день, месяц, год. Групп цифр внутри числа
+    нет: иначе «10» из даты «2026-10-15» служило бы опорой для выдуманных «10 часов»."""
     prepared = _split_digits(text)
     parts = [part for date in _DATE.findall(prepared) for part in _DIGITS.findall(date)]
     numbers = NUMBER.findall(_DATE.sub(" ", prepared))
-    found = dict.fromkeys(_plain(Decimal(item)) for item in [*parts, *numbers])
-    return [item for item in found if item not in known]
+    return [_plain(Decimal(item)) for item in [*parts, *numbers]]
+
+
+def unsourced_numbers(text: str, source: str) -> list[str]:
+    """Числа текста, которых нет в источнике. Строже входов расчёта: число источника —
+    только целиком или частью даты, без групп цифр."""
+    known = set(_mentioned(source))
+    return [item for item in dict.fromkeys(_mentioned(text)) if item not in known]
 
 
 def _unsourced(args: CalculateArgs, sources: set[str]) -> list[str]:

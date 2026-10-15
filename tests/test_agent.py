@@ -459,7 +459,9 @@ def test_refusal_with_numbers_from_input_is_kept(database: Database, small: Path
 
 def test_answer_numbers_are_matched_whole_and_dates_by_parts() -> None:
     source = "Данные с 2026-03-01 по 2026-03-15; участок K1; итог 2 852,50"
-    assert unsourced_numbers("с 01.03.2026 по 15.03.2026, K1, 2852.5 и 50", source) == []
+    assert unsourced_numbers("с 01.03.2026 по 15.03.2026, K1, 2852.5", source) == []
+    # Группа цифр числа источника опорой не служит: ни дробная часть, ни кусок даты целиком.
+    assert unsourced_numbers("50 и 202603", source) == ["50", "202603"]
     assert unsourced_numbers("было 124.5 ч, а не 0", source) == ["124.5", "0"]
     # Число не опирается на часть другого числа.
     assert unsourced_numbers("285", source) == ["285"]
@@ -468,6 +470,28 @@ def test_answer_numbers_are_matched_whole_and_dates_by_parts() -> None:
     # Пробел между двумя числами их не склеивает; разряды одного числа склеивает.
     assert unsourced_numbers("с 01.03.2026 15.03.2026 нет", source) == []
     assert unsourced_numbers("итог 2 852,50", source) == []
+
+
+def test_refusal_leans_on_user_info_and_earlier_user_messages(
+    database: Database, small: Path
+) -> None:
+    model = ScriptedModel(
+        [
+            final("Уточните участок", "answer"),
+            tools(_downtime_k2()),
+            final("Смена 7 — не ваша; данные у вас только по 02.01.2026", "refusal"),
+        ]
+    )
+    service, _ = _service(database, model)
+    session = new_session()
+    service.turn("u-k1", session, "Что со сменой 7?")
+    reply = service.turn("u-k1", session, "Сколько простоя у соседей с 05.03.2026 по 15.03.2026?")
+    # «7» — только из прошлой реплики пользователя; 2 и 1 из даты — только из сведений
+    # о пользователе: последний день его данных.
+    assert reply.body["answer"] == "Смена 7 — не ваша; данные у вас только по 02.01.2026"
+    model.steps = [tools(_downtime_k2()), final("Смена 8 — не ваша", "refusal")]
+    reply = service.turn("u-k1", new_session(), "Сколько простоя у соседей?")
+    assert reply.body["answer"] == REFUSAL_ANSWER
 
 
 def test_refusal_does_not_lean_on_earlier_model_answers(database: Database, small: Path) -> None:

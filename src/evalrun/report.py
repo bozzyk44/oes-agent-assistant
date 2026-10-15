@@ -325,7 +325,7 @@ def _diagnostics(attempts: list[dict[str, Any]]) -> list[str]:
 
 
 def _sum(diags: list[dict[str, Any]], name: str) -> int:
-    return sum(int(d[name]) for d in diags)
+    return sum(int(d.get(name, 0)) for d in diags)
 
 
 def _category(question: dict[str, Any]) -> str:
