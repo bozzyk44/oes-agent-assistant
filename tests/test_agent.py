@@ -440,6 +440,24 @@ def test_history_is_visible_in_the_next_turn(database: Database, small: Path) ->
     assert messages[1]["content"] == first_turn
 
 
+def test_user_header_names_the_reference_day() -> None:
+    # «Сегодня» — последний день доступных данных, от него модель считает «вчера»: точку
+    # отсчёта задаёт код, а не догадка модели.
+    from datetime import date
+
+    from assistant.access import Grants, Period
+    from assistant.turn.context import user_info
+
+    grants = Grants("u", "Имя", "Должность", kpi={"production": frozenset({"S"})})
+    periods = {
+        "production": Period(date(2026, 3, 1), date(2026, 3, 14)),
+        "downtime": Period(date(2026, 3, 1), date(2026, 3, 15)),
+    }
+    header = user_info(grants, periods)
+    assert "Сегодня — 2026-03-15, последний день доступных данных; вчера — 2026-03-14." in header
+    assert "Сегодня" not in user_info(grants, {})
+
+
 def test_text_answer_and_thinking(database: Database, small: Path) -> None:
     model = ScriptedModel([reply_text("<think>прикину</think>Ответа нет в документах.")])
     service, _ = _service(database, model)
@@ -685,6 +703,48 @@ def test_kpi_derived_columns_and_average(database: Database, small: Path) -> Non
     )
     values = {item["group"]["site"]: item["values"] for item in average["data"]["groups"]}
     assert values == {"K1": {"avg_tonnes": 105, "count": 2}, "K2": {"avg_tonnes": 210, "count": 3}}
+
+
+def test_kpi_relative_period_is_resolved_by_code(database: Database, small: Path) -> None:
+    # «Вчера» считает код от последнего дня доступных данных и называет даты в пояснении.
+    relative = _tool(
+        database,
+        "u-eng",
+        KPI,
+        table="production",
+        period={"relative": "yesterday"},
+        group_by=["site"],
+        aggregates=[{"function": "sum", "column": "tonnes"}, {"function": "count"}],
+    )
+    explicit = _tool(
+        database,
+        "u-eng",
+        KPI,
+        table="production",
+        period={"date_from": "2026-01-01", "date_to": "2026-01-01"},
+        group_by=["site"],
+        aggregates=[{"function": "sum", "column": "tonnes"}, {"function": "count"}],
+    )
+    assert relative["data"] == explicit["data"]
+    assert "с 2026-01-01 по 2026-01-01; сегодня — 2026-01-02" in relative["note"]
+    week = _tool(database, "u-eng", KPI, table="production", period={"relative": "last_7_days"})
+    assert "с 2025-12-27 по 2026-01-02" in week["note"]
+    both = _tool(
+        database,
+        "u-eng",
+        KPI,
+        table="production",
+        period={"relative": "today", "date_from": "2026-01-01", "date_to": "2026-01-01"},
+    )
+    assert both["status"] == Status.INVALID.value
+    unknown = _tool(database, "u-eng", KPI, table="production", period={"relative": "tomorrow"})
+    assert unknown["status"] == Status.INVALID.value
+    # Оборудование — текущее состояние: период не применяется и в пояснении не называется.
+    equipment = _tool(database, "u-eng", KPI, table="equipment", period={"relative": "yesterday"})
+    assert equipment["status"] == Status.OK.value and "Период" not in equipment.get("note", "")
+    # Нет доступа к таблице — отказ, а не «данных нет»: точка отсчёта не раньше прав.
+    hr = _tool(database, "u-hr", KPI, table="production", period={"relative": "yesterday"})
+    assert hr["status"] == Status.DENIED.value
 
 
 def test_kpi_empty_and_invalid(database: Database, small: Path) -> None:

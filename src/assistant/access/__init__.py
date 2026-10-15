@@ -15,18 +15,22 @@ from assistant.access.documents import (
 )
 from assistant.access.grants import Grants, load_grants
 from assistant.access.kpi import (
+    RELATIVE_PERIODS,
     Filter,
     KpiQuery,
     KpiResult,
     Period,
     data_periods,
     query_rows,
+    reference_day,
+    relative_dates,
 )
 from assistant.access.overview import Overview, overview
 from assistant.access.repair import RepairCheck, check_repair
 from assistant.access.status import Status
 
 __all__ = [
+    "RELATIVE_PERIODS",
     "Chunk",
     "DocumentResult",
     "Filter",
@@ -44,5 +48,7 @@ __all__ = [
     "load_grants",
     "overview",
     "query_rows",
+    "reference_day",
+    "relative_dates",
     "search",
 ]

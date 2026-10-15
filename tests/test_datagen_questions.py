@@ -100,12 +100,28 @@ def test_kpi_expectations_are_recomputed_from_files(dataset: Dataset) -> None:
     average = (Decimal(sum(tonnes)) / len(tonnes)).quantize(Decimal("0.1"), ROUND_HALF_UP)
     assert _expected(root, mean.qid)["must_include"] == [str(average)]
 
-    (plan,) = _by_case(world, "kpi_and_doc")
+    plan, by_sites = _by_case(world, "kpi_and_doc")
     produced = sum(_tonnes(production, plan.basis))
     days = len({row["date"] for row in production if _within(row, plan.basis)})
     planned = world.shift_plan[plan.basis["site"]] * 2 * days
     percent = (Decimal(produced) * 100 / planned).quantize(Decimal("0.1"), ROUND_HALF_UP)
     assert _expected(root, plan.qid)["must_include"] == [str(percent)]
+
+    # «Вчера» — день перед последним днём данных; план — по каждому участку своим.
+    last = max(date.fromisoformat(row["date"]) for row in production)
+    yesterday = (last - timedelta(days=1)).isoformat()
+    assert by_sites.basis["day"].isoformat() == yesterday
+    percents = []
+    for site in by_sites.basis["sites"]:
+        day = sum(
+            int(row["tonnes"])
+            for row in production
+            if row["site"] == site and row["date"] == yesterday
+        )
+        share = Decimal(day) * 100 / (world.shift_plan[site] * 2)
+        percents.append(str(share.quantize(Decimal("0.1"), ROUND_HALF_UP)))
+    assert len(percents) >= 2
+    assert _expected(root, by_sites.qid)["must_include"] == percents
 
     (similar,) = _by_case(world, "kpi_not_similar_doc")
     minutes = _downtime_minutes(root, similar.basis["site"], similar.basis["reason"])
@@ -340,7 +356,15 @@ def test_short_expectations_are_not_bare_digits(dataset: Dataset) -> None:
 def test_tenths_expectations_are_not_a_prefix_of_a_wrong_answer(seed: int) -> None:
     # «96» подстрокой есть в неверном «96.4 %»: вопросы до десятых ждут «96.4», а не «96».
     world = build_world(seed)
-    tenths = [question for question in _questions(world).values() if question.tenths]
+    questions = _questions(world).values()
+    # Период, заданный словами вопроса, под десятые не подобрать: ноль в десятых там
+    # законен, его держит сравнение чисел по значению (решение 18).
+    for question in questions:
+        if question.fixed_period:
+            assert question.tenths and all(
+                len(value.partition(".")[2]) == 1 for value in question.must_include
+            )
+    tenths = [question for question in questions if question.tenths and not question.fixed_period]
     assert {question.case for question in tenths} == {
         "kpi_calc",
         "kpi_and_doc",
@@ -366,7 +390,7 @@ def test_tenths_check_catches_a_whole_number(
     monkeypatch.setattr("datagen.check.build_questions", lambda *_: spoiled)
     problems = check_traps(root, world)
     for question in spoiled:
-        if question.tenths:
+        if question.tenths and not question.fixed_period:
             assert any(question.qid in p and "десятыми" in p for p in problems), question.qid
 
 

@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
-from assistant.access import Grants, Period
+from assistant.access import Grants, Period, reference_day, relative_dates
 
 TABLE_NAMES = {
     "production": "добыча (production)",
@@ -83,6 +83,12 @@ def user_info(grants: Grants, periods: dict[str, Period]) -> str:
         lines.append(
             f"Данные «{TABLE_NAMES.get(table, table)}» — с {period.first.isoformat()}"
             f" по {period.last.isoformat()}."
+        )
+    today = reference_day(periods)
+    if today is not None:
+        lines.append(
+            f"Сегодня — {today.isoformat()}, последний день доступных данных;"
+            f" вчера — {relative_dates('yesterday', today)[0].isoformat()}."
         )
     return "\n".join(lines)
 

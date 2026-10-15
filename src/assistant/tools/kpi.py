@@ -14,9 +14,20 @@ from typing import Any
 
 from sqlalchemy import Connection
 
-from assistant.access import Filter, Grants, KpiQuery, KpiResult, Status, query_rows
+from assistant.access import (
+    RELATIVE_PERIODS,
+    Filter,
+    Grants,
+    KpiQuery,
+    KpiResult,
+    Status,
+    data_periods,
+    query_rows,
+    reference_day,
+    relative_dates,
+)
 from assistant.access.kpi import MAX_LIMIT
-from assistant.tools.schemas import KPI_COLUMNS, KpiArgs
+from assistant.tools.schemas import KPI_COLUMNS, KpiArgs, KpiPeriod
 
 DURATION = "duration_hours"
 SINCE_PPR = "hours_since_ppr"
@@ -52,6 +63,28 @@ def run_kpi(connection: Connection, grants: Grants, args: KpiArgs) -> KpiAnswer:
     except _Invalid as error:
         return KpiAnswer(Status.INVALID, note=str(error))
 
+    resolved = ""
+    relative = args.period.relative if args.period is not None else None
+    if relative is not None and args.table == "equipment":
+        # Оборудование — текущее состояние, период к нему не применяется: даты в пояснении
+        # выдали бы его за данные «за вчера».
+        args = args.model_copy(update={"period": None})
+    elif relative is not None:
+        today = reference_day(data_periods(connection, grants))
+        if today is None:
+            # Доступных данных нет: отказ или пустой ответ решает слой доступа, как без
+            # периода, — точка отсчёта не говорит ничего о закрытых таблицах.
+            args = args.model_copy(update={"period": None})
+        else:
+            first, last = relative_dates(relative, today)
+            period = KpiPeriod(date_from=first, date_to=last)
+            args = args.model_copy(update={"period": period})
+            resolved = (
+                f"Период «{RELATIVE_PERIODS[relative][2]}»: с {first.isoformat()}"
+                f" по {last.isoformat()}; сегодня — {today.isoformat()}, последний день"
+                " доступных данных."
+            )
+
     filters = [Filter(item.column, item.op, item.value) for item in args.filters]
     if any(item.column in (DURATION, SINCE_PPR) for item in filters):
         return KpiAnswer(Status.INVALID, note="filters: производные колонки не фильтруются")
@@ -70,7 +103,7 @@ def run_kpi(connection: Connection, grants: Grants, args: KpiArgs) -> KpiAnswer:
     limit = MAX_LIMIT if args.aggregates or args.group_by else args.limit
     found = query_rows(connection, grants, KpiQuery(args.table, tuple(filters), limit))
     answer = KpiAnswer(found.status, partially_denied=found.partially_denied)
-    answer.note = _note(found, args, bounds)
+    answer.note = " ".join(part for part in (resolved, _note(found, args, bounds)) if part)
     if found.status is not Status.OK:
         if found.status is Status.INVALID:
             answer.note = found.problem
@@ -111,15 +144,22 @@ def _check_columns(args: KpiArgs, columns: tuple[str, ...]) -> None:
                 f"aggregates: {item.function} — только по числовым колонкам"
                 f" {', '.join(_NUMERIC[args.table])}"
             )
-    if args.period is not None and args.period.date_from > args.period.date_to:
+    period = args.period
+    if (
+        period is not None
+        and period.date_from is not None
+        and period.date_to is not None
+        and period.date_from > period.date_to
+    ):
         raise _Invalid("period: date_from позже date_to")
 
 
 def _bounds(args: KpiArgs) -> tuple[datetime, datetime] | None:
-    if args.period is None:
+    period = args.period
+    if period is None or period.date_from is None or period.date_to is None:
         return None
-    begin = datetime.combine(args.period.date_from, time())
-    end = datetime.combine(args.period.date_to + timedelta(days=1), time())
+    begin = datetime.combine(period.date_from, time())
+    end = datetime.combine(period.date_to + timedelta(days=1), time())
     return begin, end
 
 

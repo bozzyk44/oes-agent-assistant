@@ -280,8 +280,12 @@ def _check_question_set(root: Path, world: World, problems: list[str]) -> None:
                 problems.append(f"вопросы: ответ {question.qid} есть в служебной записке")
         if any("десят" in text for text in question.formulations) != question.tenths:
             problems.append(f"вопросы: {question.qid} просит десятые без пометки или наоборот")
-        if question.tenths and not (
-            question.must_include and all(has_tenths(value) for value in question.must_include)
+        if (
+            question.tenths
+            and not question.fixed_period
+            and not (
+                question.must_include and all(has_tenths(value) for value in question.must_include)
+            )
         ):
             problems.append(
                 f"вопросы: в must_include {question.qid} нет числа с ненулевыми десятыми —"
