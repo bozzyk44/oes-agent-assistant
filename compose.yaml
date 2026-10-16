@@ -138,8 +138,8 @@ services:
   # и сборщик OpenTelemetry (решение 9). Только с профилем observability: базовый запуск
   # остаётся лёгким. Сервис шлёт телеметрию на lgtm:4318, если задан OTEL_EXPORTER_OTLP_ENDPOINT;
   # `make observe` задаёт его сам. Порт на хосте — только на локальном адресе; на стенде
-  # Grafana открывается через прокси с паролем по пути /grafana/ (решение 23), выкатка
-  # включает профиль по STAND_OBSERVABILITY. Данные живут внутри контейнера.
+  # Grafana открывается через прокси по пути /grafana/, со своим входом (решения 23 и 24),
+  # выкатка включает профиль по STAND_OBSERVABILITY. Данные живут внутри контейнера.
   lgtm:
     image: grafana/otel-lgtm:0.34.0
     profiles: ["observability"]
@@ -159,12 +159,17 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
       GF_AUTH_BASIC_ENABLED: "false"
       GF_SNAPSHOTS_EXTERNAL_ENABLED: "false"
-    # Без пароля не стартует: иначе Grafana завела бы admin/admin. Команда образа та же.
+      # Блокировка после неудачных входов — по имени пользователя, а он один и известен:
+      # любой из интернета держал бы admin запертым. Подбор пароля из make-env нереален и так.
+      GF_SECURITY_DISABLE_BRUTE_FORCE_LOGIN_PROTECTION: "true"
+    # Без пароля или с меткой вместо него не стартует: иначе Grafana завела бы admin/admin
+    # или пароль, известный из .env.example. Команда образа та же.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
-        test -n "$$GF_SECURITY_ADMIN_PASSWORD"
-        || { echo "lgtm: нужен GRAFANA_ADMIN_PASSWORD" >&2; exit 1; };
+        case "$$GF_SECURITY_ADMIN_PASSWORD" in
+        ""|*__GENERATE__*) echo "lgtm: GRAFANA_ADMIN_PASSWORD пуст или метка — запусти make-env" >&2; exit 1 ;;
+        esac;
         exec /otel-lgtm/run-all.sh
     mem_limit: 1200m
     restart: unless-stopped
