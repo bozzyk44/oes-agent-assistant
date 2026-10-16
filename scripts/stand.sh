@@ -12,7 +12,7 @@
 # на 127.0.0.1 сервера — проверка через SSH-туннель; наружу — только с STAND_PUBLISH=1.
 #
 # На сервер уходит закоммиченный код (`git archive`, вместе с data/) и из локального .env —
-# только настройки модели и цены. Пароли базы и Grafana и TOIR_TOKEN сервер создаёт себе сам из
+# только настройки модели, цены и вход в Grafana. Пароли базы и TOIR_TOKEN сервер создаёт себе сам из
 # .env.example при первом развёртывании и хранит между выкатками. Ключа облака на сервере нет.
 set -euo pipefail
 
@@ -26,11 +26,12 @@ known="$state/known_hosts"
 # Каталоги на сервере: код заменяется при каждой выкатке, .env остаётся.
 remote_home="oes"
 
-# Что из локального .env нужно серверу: модель, цены, имя стенда для прокси и выбор
-# наблюдаемости. Секреты базы, ТОиР и пароль прокси — свои на сервере.
+# Что из локального .env нужно серверу: модель, цены, имя стенда для прокси, выбор
+# наблюдаемости и вход в Grafana — один с локальным. Секреты базы, ТОиР и пароль прокси —
+# свои на сервере.
 MODEL_VARS="MODEL_BASE_URL MODEL_API_KEY MODEL_NAME MODEL_MAX_OUTPUT_TOKENS MODEL_TIMEOUT_SECONDS
 MODEL_RESPONSE_FORMAT MODEL_EXTRA_BODY MODEL_TOKEN_CHARS PRICE_INPUT PRICE_CACHED PRICE_OUTPUT
-STAND_DOMAIN PROXY_USER STAND_OBSERVABILITY"
+STAND_DOMAIN PROXY_USER STAND_OBSERVABILITY GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD"
 
 die() { echo "stand: $*" >&2; exit 1; }
 
