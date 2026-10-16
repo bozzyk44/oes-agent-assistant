@@ -47,7 +47,7 @@ curl -s -X POST 127.0.0.1:8000/actions/<action_id из pending_action>/confirm -
 | `make eval-report` | Пересобирает `eval/report.md` из `eval/results.jsonl` без сервиса |
 | `make eval-compare A=… B=…` | Сравнивает два прогона из `eval/runs/` попарно по вопросам; конфигурации должны отличаться ровно в одном поле |
 | `make mutants` | Прогон против сборок сервиса с одной отключённой защитой; таблица — `eval/mutants/mutants.md`. По умолчанию со сценарной заглушкой; `MUTANT_MODE=model` — с настоящей моделью, платно |
-| `make observe` | То же, что `make run`, плюс наблюдаемость: трассы хода, метрики токенов и журнал в Grafana на `http://127.0.0.1:3000` — один контейнер `grafana/otel-lgtm` |
+| `make observe` | То же, что `make run`, плюс наблюдаемость: трассы хода, метрики токенов и журнал в Grafana на `http://127.0.0.1:3000/grafana/` — один контейнер `grafana/otel-lgtm` |
 | `make migrate` | Применяет миграции к базе текущего запуска; `make run` делает это сам |
 | `make ci` | Проверка миграций, `make test` и сценарий сборки на чистой копии текущего коммита |
 
